@@ -402,6 +402,12 @@ mode: rule
 
 如果 `PROXY_SUB_URL` 不为空，`refresh_proxy.sh` 会下载订阅并更新本地配置；如果为空，则生成 DIRECT-only 配置。不要在 Git 中提交包含订阅 token 的 `proxy/config.yaml`。首次部署不要跳过初始化步骤直接执行 `docker compose up -d`，否则 Docker 可能把缺失的配置文件创建成目录。
 
+Mihomo 控制接口（9090）需要密码才能访问。`refresh_proxy.sh`（以及 Windows 的 `deploy/install-local.ps1`）第一次运行时会生成一个随机密码，保存在 `state/proxy/controller-secret`，并写入 `proxy/config.yaml` 的 `secret`；之后刷新订阅也会沿用同一个密码。想自己指定时，在 `.env` 中设置 `PROXY_CONTROLLER_SECRET`（只能包含字母、数字和 `. _ ~ -`），再运行一次 `refresh_proxy.sh`。通过 SSH 隧道用 metacubexd 等面板连接控制接口时，需要填写这个密码：
+
+```bash
+cat state/proxy/controller-secret
+```
+
 如果宿主机 Docker Engine 较旧，Web 容器中的 Docker 运维功能可能需要显式指定
 `DOCKER_API_VERSION`。默认留空即可；只有确认宿主机 API 版本后，才在 `.env` 中设置，
 例如 `DOCKER_API_VERSION=1.43`。

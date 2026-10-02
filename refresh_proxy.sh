@@ -12,6 +12,7 @@ read_env_value() {
   fi
   local raw
   raw="$(grep -E "^${key}=" "$ENV_FILE" | tail -n 1 | cut -d= -f2- || true)"
+  raw="${raw%$'\r'}"
   raw="${raw%\"}"
   raw="${raw#\"}"
   raw="${raw%\'}"
@@ -27,6 +28,33 @@ CONFIG_DIR="$APP_ROOT/proxy"
 CONFIG_FILE="$CONFIG_DIR/config.yaml"
 EXAMPLE_CONFIG="$CONFIG_DIR/config.example.yaml"
 USER_AGENT="${PROXY_USER_AGENT:-clash-verge/1.7.7}"
+
+# The controller API must not be open to every container on the network. The
+# secret lives under state/ so a subscription refresh that replaces config.yaml
+# writes the same value back instead of rotating it on every refresh. It is
+# resolved before the subscription download so a rejected secret never leaves
+# a freshly downloaded config without one.
+SECRET_FILE="$APP_ROOT/state/proxy/controller-secret"
+PROXY_CONTROLLER_SECRET="${PROXY_CONTROLLER_SECRET:-$(read_env_value PROXY_CONTROLLER_SECRET)}"
+if [ -n "${PROXY_CONTROLLER_SECRET:-}" ]; then
+  controller_secret="$PROXY_CONTROLLER_SECRET"
+  echo "Proxy controller secret: using PROXY_CONTROLLER_SECRET."
+elif [ -s "$SECRET_FILE" ]; then
+  controller_secret="$(tr -d '\r\n' < "$SECRET_FILE")"
+  echo "Proxy controller secret: keeping $SECRET_FILE."
+else
+  mkdir -p "$(dirname "$SECRET_FILE")"
+  controller_secret="$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
+  (umask 077 && printf '%s\n' "$controller_secret" > "$SECRET_FILE")
+  chmod 600 "$SECRET_FILE" 2>/dev/null || true
+  echo "Proxy controller secret: generated $SECRET_FILE."
+fi
+# The value is written into a single-quoted YAML scalar through sed, so keep it
+# to characters that need no escaping in either.
+if ! printf '%s' "$controller_secret" | grep -Eq '^[A-Za-z0-9._~-]+$'; then
+  echo "Proxy controller secret may only contain letters, digits and . _ ~ -" >&2
+  exit 1
+fi
 
 mkdir -p "$CONFIG_DIR"
 
@@ -60,6 +88,7 @@ ensure_line "mixed-port" "7890"
 ensure_line "allow-lan" "true"
 ensure_line "bind-address" "'*'"
 ensure_line "external-controller" "'0.0.0.0:9090'"
+ensure_line "secret" "'$controller_secret'"
 
 if command -v docker >/dev/null 2>&1 && [ -f "$APP_ROOT/docker-compose.yml" ]; then
   if docker compose version >/dev/null 2>&1; then

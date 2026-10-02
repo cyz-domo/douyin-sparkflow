@@ -51,8 +51,7 @@ webui/
 │   ├── app.js          # 主题切换脚本
 │   ├── lucide.min.js      # 本地化图标库
 │   ├── lucide-LICENSE.txt # 图标库许可证
-│   ├── styles.css      # 基础样式
-│   └── multiPagePlugins/  # 浏览器扩展插件
+│   └── styles.css      # 基础样式
 └── templates/          # HTML 模板
     ├── base.html       # 基础布局模板
     ├── dashboard.html  # 仪表盘（主界面）
