@@ -47,17 +47,19 @@
 ```
 webui/
 ├── static/              # 静态资源
-│   ├── app.css         # 主题样式（亮色/暗色）
-│   ├── app.js          # 主题切换脚本
+│   ├── app.css         # 设计系统与亮/暗主题
+│   ├── app.js          # 主题、实时刷新、登录工作区、好友选择器等交互
 │   ├── lucide.min.js      # 本地化图标库
-│   ├── lucide-LICENSE.txt # 图标库许可证
-│   └── styles.css      # 基础样式
+│   └── lucide-LICENSE.txt # 图标库许可证
 └── templates/          # HTML 模板
-    ├── base.html       # 基础布局模板
-    ├── dashboard.html  # 仪表盘（主界面）
-    ├── login.html      # 登录页
-    ├── send_console.html  # 发送控制台
-    └── logs.html       # 日志查看
+    ├── base.html       # 基础布局（左侧导航 / 手机底部标签栏）
+    ├── login.html      # 控制台登录与初始化
+    ├── dashboard.html  # 今日：进度、需处理目标、账号进度
+    ├── send_console.html  # 发送明细：按账号查看目标结果
+    ├── accounts.html   # 账号与目标好友
+    ├── login_workspace.html  # 扫码 / Cookie 登录抖音账号
+    ├── settings.html   # 设置（消息、发送窗口、运维、系统、Web 用户）
+    └── logs.html       # 运行日志
 ```
 
 ### `utils/` - 工具模块

@@ -1,44 +1,42 @@
 (() => {
   const root = document.documentElement;
   const storageKey = "sparkflow-theme";
+  const systemDark = window.matchMedia
+    ? window.matchMedia("(prefers-color-scheme: dark)")
+    : null;
 
   const storedTheme = () => {
     try {
-      return localStorage.getItem(storageKey);
+      const value = localStorage.getItem(storageKey);
+      return value === "light" || value === "dark" ? value : null;
     } catch {
       return null;
     }
   };
 
+  const systemTheme = () => (systemDark && systemDark.matches ? "dark" : "light");
+
   const applyTheme = (theme) => {
-    const value = theme === "light" ? "light" : "dark";
-    root.dataset.theme = value;
-    root.style.colorScheme = value;
-    try {
-      localStorage.setItem(storageKey, value);
-    } catch {
-      // The active page can still switch themes when storage is unavailable.
-    }
+    root.dataset.theme = theme === "dark" ? "dark" : "light";
   };
 
-  applyTheme(storedTheme() || "dark");
+  // The <head> script already applied this before first paint; repeat it here
+  // so pages without that script still end up consistent.
+  applyTheme(storedTheme() || systemTheme());
+  // Until the user picks a theme explicitly, keep following the system.
+  systemDark?.addEventListener?.("change", () => {
+    if (!storedTheme()) applyTheme(systemTheme());
+  });
   document.querySelectorAll("[data-theme-toggle]").forEach((button) => {
     button.addEventListener("click", () => {
-      applyTheme(root.dataset.theme === "light" ? "dark" : "light");
+      const next = root.dataset.theme === "dark" ? "light" : "dark";
+      applyTheme(next);
+      try {
+        localStorage.setItem(storageKey, next);
+      } catch {
+        // The active page can still switch themes when storage is unavailable.
+      }
     });
-  });
-})();
-
-(() => {
-  const body = document.body;
-  document.querySelectorAll("[data-nav-toggle]").forEach((button) => {
-    button.addEventListener("click", () => body.classList.add("nav-open"));
-  });
-  document.querySelectorAll("[data-nav-close]").forEach((button) => {
-    button.addEventListener("click", () => body.classList.remove("nav-open"));
-  });
-  document.querySelectorAll(".nav-item").forEach((link) => {
-    link.addEventListener("click", () => body.classList.remove("nav-open"));
   });
 })();
 
@@ -219,9 +217,13 @@
         });
         row.querySelectorAll("[data-account-attention]").forEach((node) => {
           node.textContent = account.attention;
+          const chip = node.closest(".pill");
+          if (chip && row.matches("a")) chip.hidden = !account.attention;
         });
         row.querySelectorAll("[data-account-pending]").forEach((node) => {
           node.textContent = account.pending;
+          const chip = node.closest(".pill");
+          if (chip && row.matches("a")) chip.hidden = !account.pending;
         });
         const strongCount = account.confirmed || 0;
         const weakCount = (account.pageEcho || 0) + (account.receiptOnly || 0);
@@ -306,6 +308,22 @@
       `${sentPct}%`,
     );
     setText("[data-overview-value='weakSent']", weakCount);
+    const remaining = Math.max(0, totalCount - strongCount - weakCount);
+    document.querySelectorAll("[data-overview-headline]").forEach((node) => {
+      node.textContent = !totalCount
+        ? "还没有要续的火花"
+        : remaining
+          ? `今天还差 ${remaining} 个火花`
+          : "今天的火花都续上了";
+    });
+    const attentionCount = summary.attention || 0;
+    document.querySelectorAll("[data-attention-callout]").forEach((node) => {
+      node.hidden = attentionCount <= 0;
+    });
+    document.querySelectorAll("[data-nav-attention]").forEach((node) => {
+      node.textContent = attentionCount;
+      node.hidden = attentionCount <= 0;
+    });
     document.querySelectorAll("[data-overview-badge]").forEach((node) => {
       node.style.setProperty("--strong-pct", `${strongPct}%`);
       node.style.setProperty("--weak-pct", `${weakPct}%`);
@@ -510,7 +528,7 @@
       }
       return;
     }
-    setStatus("登录工作区当前关闭。请从账号卡片点击“重新登录”。");
+    setStatus("登录工作区当前空闲。点“添加新账号”，或在账号页选择“重新登录”。");
   };
 
   let qrPollStartedAt = 0;
@@ -1125,6 +1143,7 @@
     if (!batchSummary) return;
     const ok = results.filter((item) => item.ok).length;
     const failed = results.filter((item) => !item.ok);
+    batchSummary.hidden = false;
     batchSummary.textContent = failed.length
       ? `成功 ${ok} 个，失败 ${failed.length} 个：${failed.map((item) => item.message).join("；")}`
       : `全部成功（${ok} 个账号）`;
@@ -1133,7 +1152,10 @@
     const pickers = [...document.querySelectorAll(".friend-picker")];
     const results = [];
     batchButton.disabled = true;
-    if (batchSummary) batchSummary.textContent = `正在刷新 ${pickers.length} 个账号…`;
+    if (batchSummary) {
+      batchSummary.hidden = false;
+      batchSummary.textContent = `正在刷新 ${pickers.length} 个账号…`;
+    }
     try {
       for (const picker of pickers) {
         if (typeof picker.refreshFriends !== "function") continue;

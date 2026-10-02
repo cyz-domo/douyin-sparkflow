@@ -1029,12 +1029,12 @@ def create_app():
         current = principal(request)
         if current.get("role") == "admin":
             flash(request, "请在系统设置中修改管理员密码。", "info")
-            return redirect("/")
+            return redirect("/settings#system")
         password = str(form.get("new_password", ""))
         confirm = str(form.get("confirm_password", ""))
         if not password or password != confirm:
             flash(request, "两次密码输入不一致。", "error")
-            return redirect("/")
+            return redirect("/settings#password")
         try:
             update_web_user(current["username"], password=password)
             flash(request, "密码已修改，请重新登录。", "success")
@@ -1042,7 +1042,7 @@ def create_app():
             return redirect("/login")
         except UserStoreError as exc:
             flash(request, str(exc), "error")
-            return redirect("/")
+            return redirect("/settings#password")
 
     @app.post("/admin/users/create")
     async def create_admin_user(request: Request):
@@ -1063,7 +1063,7 @@ def create_app():
             flash(request, "普通用户已创建。", "success")
         except UserStoreError as exc:
             flash(request, str(exc), "error")
-        return redirect("/#user-management")
+        return redirect("/settings#users")
 
     @app.post("/admin/users/{username}/update")
     async def update_admin_user(request: Request, username: str):
@@ -1085,7 +1085,7 @@ def create_app():
             flash(request, "普通用户已更新。", "success")
         except UserStoreError as exc:
             flash(request, str(exc), "error")
-        return redirect("/#user-management")
+        return redirect("/settings#users")
 
     @app.post("/admin/users/{username}/delete")
     async def delete_admin_user(request: Request, username: str):
@@ -1102,29 +1102,69 @@ def create_app():
                 flash(request, "普通用户不存在。", "error")
         except UserStoreError as exc:
             flash(request, str(exc), "error")
-        return redirect("/#user-management")
+        return redirect("/settings#users")
+
+    def console_context(request, *, with_admin_data=False):
+        current = principal(request)
+        is_admin_user = current.get("role") == "admin"
+        context = {
+            "flash": pop_flash(request),
+            "accounts": get_visible_accounts(current, get_userData(force_reload=True)),
+            "ops": scoped_ops_snapshot(request),
+            "principal": current,
+            "is_admin": is_admin_user,
+            "runtime_config": {},
+            "web_users": [],
+            "all_accounts": [],
+        }
+        if with_admin_data and is_admin_user:
+            context["runtime_config"] = get_config(force_reload=True)
+            context["web_users"] = get_web_users()
+            context["all_accounts"] = get_userData(force_reload=True)
+        return context
 
     @app.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request):
         maybe_redirect = require_user(request)
         if maybe_redirect:
             return maybe_redirect
+        return render_template(request, "dashboard.html", console_context(request))
 
-        current = principal(request)
-        accounts = get_visible_accounts(current, get_userData(force_reload=True))
+    @app.get("/accounts", response_class=HTMLResponse)
+    async def accounts_page(request: Request):
+        maybe_redirect = require_user(request)
+        if maybe_redirect:
+            return maybe_redirect
+        return render_template(request, "accounts.html", console_context(request))
+
+    @app.get("/login-workspace", response_class=HTMLResponse)
+    async def login_workspace_page(request: Request):
+        maybe_redirect = require_user(request)
+        if maybe_redirect:
+            return maybe_redirect
+        context = console_context(request)
+        # "Re-login" on the accounts page lands here with the account preselected;
+        # only accounts the current user can see are matched.
+        relogin = str(request.query_params.get("relogin", "")).strip()
+        context["relogin_account"] = next(
+            (
+                account
+                for account in context["accounts"]
+                if relogin and str(account.get("unique_id") or "") == relogin
+            ),
+            None,
+        )
+        return render_template(request, "login_workspace.html", context)
+
+    @app.get("/settings", response_class=HTMLResponse)
+    async def settings_page(request: Request):
+        maybe_redirect = require_user(request)
+        if maybe_redirect:
+            return maybe_redirect
         return render_template(
             request,
-            "dashboard.html",
-            {
-                "flash": pop_flash(request),
-                "accounts": accounts,
-                "runtime_config": get_config(force_reload=True) if current.get("role") == "admin" else {},
-                "ops": scoped_ops_snapshot(request),
-                "principal": current,
-                "is_admin": current.get("role") == "admin",
-                "web_users": get_web_users() if current.get("role") == "admin" else [],
-                "all_accounts": get_userData(force_reload=True) if current.get("role") == "admin" else [],
-            },
+            "settings.html",
+            console_context(request, with_admin_data=True),
         )
 
     @app.get("/ops/send-console", response_class=HTMLResponse)
@@ -1177,7 +1217,7 @@ def create_app():
         else:
             flash(request, "Account not found.", "error")
 
-        return redirect("/")
+        return redirect(f"/accounts#account-{quote(str(unique_id), safe='')}")
 
     @app.post("/accounts/{unique_id}/toggle-enabled")
     async def toggle_account_enabled(request: Request, unique_id: str):
@@ -1209,7 +1249,7 @@ def create_app():
             f"{account.get('username', 'Account')} 已{'启用' if account['enabled'] else '停用'}自动续火花。",
             "success",
         )
-        return redirect("/")
+        return redirect(f"/accounts#account-{quote(str(unique_id), safe='')}")
 
     # Async friend refresh. The web app is a single uvicorn process, so a plain
     # dict is enough: one entry per account, overwritten by the next refresh.
@@ -1627,19 +1667,19 @@ def create_app():
         form = await request.form()
         if not validate_csrf(request, str(form.get("csrf_token", ""))):
             flash(request, "合并失败：页面已过期，请刷新后重试。", "error")
-            return redirect("/")
+            return redirect("/accounts")
 
         _, source, access_error = account_for_request(request, unique_id)
         if access_error:
             flash(request, "合并失败：找不到这条账号或没有权限。", "error")
-            return redirect("/")
+            return redirect("/accounts")
 
         target_ref = str(form.get("target_account_ref", "")).strip()
         accounts, _ = ensure_account_refs(get_userData(force_reload=True))
         target = account_by_ref(accounts, target_ref)
         if not target or not can_access_account(principal(request), target):
             flash(request, "合并失败：要保留的账号不存在或无权访问。", "error")
-            return redirect("/")
+            return redirect("/accounts")
 
         source_name = str(source.get("username") or "").strip()
         target_name = str(target.get("username") or "").strip()
@@ -1647,17 +1687,17 @@ def create_app():
             # Same nickname is the whole point: it is what makes two rows look
             # like one account, and merging different people would be data loss.
             flash(request, "合并失败：只能合并昵称相同的账号，请确认这两条确实是同一个账号。", "error")
-            return redirect("/")
+            return redirect("/accounts")
         if normalize_unique_id(source.get("unique_id")) == normalize_unique_id(target.get("unique_id")):
             flash(request, "合并失败：两条记录指向同一个账号，无需合并。", "error")
-            return redirect("/")
+            return redirect("/accounts")
 
         merged, changed = merge_user_account_into(
             source.get("unique_id"), target.get("unique_id")
         )
         if not changed:
             flash(request, "合并失败：账号可能已被其他操作改动，请刷新后重试。", "error")
-            return redirect("/")
+            return redirect("/accounts")
         logger.info(
             "Merged duplicate account: kept_uid=%s removed_uid=%s targets=%s",
             normalize_unique_id(target.get("unique_id")),
@@ -1669,7 +1709,7 @@ def create_app():
             f"已合并重复账号：目标已并入保留账号，现有 {len((merged or {}).get('targets') or [])} 个目标。",
             "success",
         )
-        return redirect("/")
+        return redirect("/accounts")
 
     @app.post("/accounts/{unique_id}/delete")
     async def delete_account(request: Request, unique_id: str):
@@ -1705,7 +1745,7 @@ def create_app():
             flash(request, "Account deleted.", "success")
         else:
             flash(request, "Account not found.", "error")
-        return redirect("/")
+        return redirect("/accounts")
 
     @app.post("/accounts/{unique_id}/retry-target")
     async def retry_account_target(request: Request, unique_id: str):
@@ -1861,7 +1901,7 @@ def create_app():
         update_config(mutate, force_reload=True)
 
         flash(request, "Runtime config saved.", "success")
-        return redirect("/")
+        return redirect("/settings#messages")
 
     @app.post("/settings")
     async def save_panel_settings(request: Request):
@@ -1891,11 +1931,11 @@ def create_app():
         if new_password:
             if new_password != confirm_password:
                 flash(request, "Admin password was not updated because the confirmation did not match.", "error")
-                return redirect("/")
+                return redirect("/settings#system")
             update_admin_password(new_password)
 
         flash(request, "Panel settings saved.", "success")
-        return redirect("/")
+        return redirect("/settings#system")
 
     @app.post("/ops/run-now")
     async def run_now(request: Request):
@@ -1969,7 +2009,7 @@ def create_app():
 
         refresh_proxy()
         flash(request, "Proxy subscription refreshed.", "success")
-        return redirect("/")
+        return redirect("/settings#ops")
 
     @app.post("/ops/proxy/restart")
     async def proxy_restart(request: Request):
@@ -1983,7 +2023,7 @@ def create_app():
 
         restart_proxy()
         flash(request, "Proxy container restarted.", "success")
-        return redirect("/")
+        return redirect("/settings#ops")
 
     @app.post("/ops/schedule")
     async def save_schedule(request: Request):
@@ -2005,13 +2045,13 @@ def create_app():
                 f"现在是发送窗口 {window_state.get('label')} 内，窗口配置在窗口结束（{int(window_state.get('endHour') or 0):02d}:00）之前不可修改。",
                 "error",
             )
-            return redirect("/")
+            return redirect("/settings#schedule")
         result = update_daily_schedule(time_string)
         if getattr(result, "returncode", 1) == 0:
             flash(request, f"Updated the daily schedule to {time_string}.", "success")
         else:
             flash(request, f"Failed to update the daily schedule to {time_string}: {getattr(result, 'stderr', '')}", "error")
-        return redirect("/")
+        return redirect("/settings#schedule")
 
     @app.post("/ops/schedule/preview")
     async def preview_schedule(request: Request):

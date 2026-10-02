@@ -84,7 +84,7 @@ class DashboardProgressRenderingTests(unittest.TestCase):
 
         self.addCleanup(restore)
 
-    def _render(self, summary, accounts, **ops_overrides):
+    def _render(self, summary, accounts, template="dashboard.html", **ops_overrides):
         ops = {
             "send_console": {
                 "summary": summary,
@@ -134,7 +134,7 @@ class DashboardProgressRenderingTests(unittest.TestCase):
             },
             "csrf_token": "test",
         }
-        return app_module.templates.env.get_template("dashboard.html").render(context)
+        return app_module.templates.env.get_template(template).render(context)
 
     def test_all_page_echo_sends_still_drive_the_progress(self):
         summary = _summary(
@@ -277,6 +277,7 @@ class DashboardProgressRenderingTests(unittest.TestCase):
         html = self._render(
             summary,
             [account],
+            template="settings.html",
             schedule_alignment={
                 "windowEnabled": True,
                 "configLabel": "10:00-18:00",
@@ -324,7 +325,7 @@ class DashboardProgressRenderingTests(unittest.TestCase):
             confirmed_targets=[{"status": "sent"}],
         )
 
-        html = self._render(summary, [account])
+        html = self._render(summary, [account], template="settings.html")
 
         self.assertNotIn("⚠", html)
         self.assertIn("现在是发送窗口", html)
@@ -333,7 +334,12 @@ class DashboardProgressRenderingTests(unittest.TestCase):
 
     def test_static_assets_no_longer_ship_the_warning_glyph(self):
         root = Path(app_module.TEMPLATES_DIR).parents[0]
-        for name in ("templates/dashboard.html", "static/app.js", "static/app.css"):
+        for name in (
+            "templates/dashboard.html",
+            "templates/settings.html",
+            "static/app.js",
+            "static/app.css",
+        ):
             with self.subTest(asset=name):
                 text = (root / name).read_text(encoding="utf-8")
                 self.assertNotIn("⚠", text)

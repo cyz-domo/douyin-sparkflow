@@ -1,0 +1,267 @@
+{% extends "base.html" %}
+
+{% block nav_key %}settings{% endblock %}
+{% block page_key %}settings{% endblock %}
+{% block title %}{% if is_admin %}设置{% else %}修改密码{% endif %}{% endblock %}
+
+{% block page_title %}{% if is_admin %}设置{% else %}修改密码{% endif %}{% endblock %}
+{% block page_sub %}<p class="page-sub">{% if is_admin %}消息、发送窗口、运维操作、系统参数和 Web 用户都在这里。{% else %}修改当前 Web 用户的登录密码。{% endif %}</p>{% endblock %}
+
+{% block content %}
+{% if is_admin %}
+{% set summary = ops.send_console.summary %}
+{% set total = summary.total_targets or 0 %}
+<div class="settings-layout">
+  <nav class="settings-nav" aria-label="设置分区">
+    <a href="#messages"><i data-lucide="message-circle-heart"></i>消息</a>
+    <a href="#schedule"><i data-lucide="calendar-clock"></i>发送窗口</a>
+    <a href="#ops"><i data-lucide="wrench"></i>运维操作</a>
+    <a href="#system"><i data-lucide="server-cog"></i>系统</a>
+    <a href="#users"><i data-lucide="users-round"></i>Web 用户</a>
+  </nav>
+
+  <div>
+    <section class="card settings-section" id="messages">
+      <div class="card-head">
+        <div>
+          <h2><i data-lucide="message-circle-heart"></i>消息</h2>
+          <p>每次续火花发出去的内容和节奏。</p>
+        </div>
+      </div>
+      <form method="post" action="/config" class="form-stack">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label class="field"><span>固定消息模板</span><input type="text" name="messageTemplate" value="{{ runtime_config.messageTemplate }}"><small>填写了消息变体时会优先从变体里随机挑选。</small></label>
+        <label class="field"><span>消息变体（每行一个）</span><textarea name="messageVariants" rows="6">{{ runtime_config.sendStrategy.messageVariants|join('\n') }}</textarea></label>
+        <div class="form-grid">
+          <label class="field"><span>两条消息最短间隔（秒）</span><input type="number" name="messageIntervalSecondsMin" min="0" value="{{ runtime_config.sendStrategy.messageIntervalSecondsMin }}"></label>
+          <label class="field"><span>两条消息最长间隔（秒）</span><input type="number" name="messageIntervalSecondsMax" min="0" value="{{ runtime_config.sendStrategy.messageIntervalSecondsMax }}"></label>
+        </div>
+        <label class="field">
+          <span>发送顺序</span>
+          <select name="shuffleTargets">
+            <option value="on" {% if runtime_config.sendStrategy.shuffleTargets %}selected{% endif %}>随机打乱</option>
+            <option value="" {% if not runtime_config.sendStrategy.shuffleTargets %}selected{% endif %}>按配置顺序</option>
+          </select>
+        </label>
+        <div class="form-actions"><button class="button button-primary" type="submit"><i data-lucide="check"></i><span>保存消息设置</span></button></div>
+      </form>
+    </section>
+
+    <section class="card settings-section" id="schedule">
+      <div class="card-head">
+        <div>
+          <h2><i data-lucide="calendar-clock"></i>发送窗口</h2>
+          <p>当前：{{ ops.daily_schedule or "未配置" }} · 下一轮 {{ ops.schedule.nextTriggerDisplay or "-" }}</p>
+        </div>
+      </div>
+      {% set window_state = schedule_window_state() %}
+      {% if window_state.inside %}
+      <p class="notice-inline warning" style="margin-bottom: 16px">
+        <i data-lucide="triangle-alert"></i>
+        <span>现在是发送窗口 {{ window_state.label }} 内（到 {{ "%02d"|format(window_state.endHour) }}:00 结束），窗口配置在此期间不可修改；窗口结束后再改即可。</span>
+      </p>
+      {% endif %}
+      <form method="post" action="/ops/schedule" class="form-stack" data-schedule-preview-url="/ops/schedule/preview">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label class="field">
+          <span>自动发送窗口（触发间隔固定 20 分钟），例如 10:00-18:00</span>
+          <input type="text" name="daily_schedule" value="{{ ops.daily_schedule }}" placeholder="10:00-18:00/20m 或单个 10:00">
+          <small>只填 <code>HH:MM</code> 表示每天一次的固定时间；窗口模式的起止必须是整点。</small>
+        </label>
+        <div class="form-actions">
+          <button class="button button-quiet" type="button" data-schedule-preview>
+            <i data-lucide="eye"></i><span>预览效果</span>
+          </button>
+          <button class="button button-primary" type="submit">
+            <i data-lucide="check"></i><span>更新发送窗口</span>
+          </button>
+        </div>
+        <div class="schedule-preview" data-schedule-preview-result hidden></div>
+      </form>
+    </section>
+
+    <section class="card settings-section" id="ops">
+      <div class="card-head">
+        <div>
+          <h2><i data-lucide="wrench"></i>运维操作</h2>
+          <p>手动触发发送、维护备用代理。任务运行中时发送类按钮会自动禁用。</p>
+        </div>
+        <a class="section-link" href="/ops/logs">运行日志<i data-lucide="arrow-right"></i></a>
+      </div>
+      <div class="ops-grid">
+        <form
+          method="post"
+          action="/ops/run-failed"
+          data-confirm-title="补发异常目标"
+          data-confirm="将补发 {{ summary.today_attention_targets }} 个异常目标。确认继续吗？"
+          data-confirm-accept="开始补发"
+          data-confirm-tone="primary"
+        >
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="button button-quiet" type="submit" data-action-count-source="attention" {% if ops.task_lock.running or summary.today_attention_targets == 0 %}disabled{% endif %}>
+            <i data-lucide="rotate-ccw"></i><span>补发异常</span>
+          </button>
+        </form>
+        <form
+          method="post"
+          action="/ops/run-now"
+          data-confirm-title="全部重发"
+          data-confirm="将向全部 {{ total }} 个目标再次发送消息。确认继续吗？"
+          data-confirm-accept="确认全部重发"
+        >
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="button button-quiet" type="submit" data-disable-while-running {% if ops.task_lock.running or total == 0 %}disabled{% endif %}>
+            <i data-lucide="send"></i><span>全部重发</span>
+          </button>
+        </form>
+        <form method="post" action="/ops/proxy/refresh">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="button button-quiet" type="submit"><i data-lucide="cloud-download"></i><span>刷新代理订阅</span></button>
+        </form>
+        <form
+          method="post"
+          action="/ops/proxy/restart"
+          data-confirm-title="重启代理容器"
+          data-confirm="重启期间登录浏览器和备用网络可能短暂断网。确认继续吗？"
+          data-confirm-accept="确认重启"
+        >
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="button button-danger" type="submit"><i data-lucide="power"></i><span>重启代理</span></button>
+        </form>
+      </div>
+    </section>
+
+    <section class="card settings-section" id="system">
+      <div class="card-head">
+        <div>
+          <h2><i data-lucide="server-cog"></i>系统</h2>
+          <p>路径、登录工作区接口、网络出口和管理员密码。</p>
+        </div>
+      </div>
+      <form method="post" action="/settings" class="form-stack">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="form-grid">
+          <label class="field"><span>Compose 根目录</span><input type="text" name="compose_root" value="{{ app_settings.compose_root }}"></label>
+          <label class="field"><span>任务日志文件</span><input type="text" name="ops_log_file" value="{{ app_settings.ops_log_file }}"></label>
+          <label class="field"><span>代理刷新脚本</span><input type="text" name="proxy_refresh_script" value="{{ app_settings.proxy_refresh_script }}"></label>
+          <label class="field"><span>登录桌面 API</span><input type="text" name="login_desktop_api_url" value="{{ app_settings.login_desktop_api_url }}"></label>
+          <label class="field">
+            <span>抖音网络出口</span>
+            <select name="douyin_network_mode">
+              <option value="direct" {% if app_settings.douyin_network_mode|default("direct") == "direct" %}selected{% endif %}>直连（默认）</option>
+              <option value="mihomo" {% if app_settings.douyin_network_mode == "mihomo" %}selected{% endif %}>Mihomo（高级）</option>
+            </select>
+          </label>
+          <label class="field"><span>Mihomo 代理地址</span><input type="text" name="douyin_proxy_url" value="{{ app_settings.douyin_proxy_url|default("http://proxy:7890") }}" placeholder="http://proxy:7890"><small>仅在选择 Mihomo 时使用。</small></label>
+          <label class="field"><span>Web 控制台端口</span><input type="number" min="1" max="65535" name="ui_port" value="{{ app_settings.ui_port }}"></label>
+        </div>
+        <fieldset>
+          <legend>修改管理员密码（留空表示不修改）</legend>
+          <div class="form-grid">
+            <label class="field"><span>新密码</span><input type="password" name="new_password" autocomplete="new-password"></label>
+            <label class="field"><span>确认新密码</span><input type="password" name="confirm_password" autocomplete="new-password"></label>
+          </div>
+        </fieldset>
+        <div class="form-actions"><button class="button button-primary" type="submit"><i data-lucide="check"></i><span>保存系统设置</span></button></div>
+      </form>
+    </section>
+
+    <section class="card settings-section" id="users">
+      <div class="card-head">
+        <div>
+          <h2><i data-lucide="users-round"></i>Web 用户</h2>
+          <p>给朋友开一个普通用户，只能看到分配给他的抖音账号。管理员始终能看到全部账号。</p>
+        </div>
+        <span class="pill">{{ web_users|length }} 个普通用户</span>
+      </div>
+
+      <details class="fold" {% if not web_users %}open{% endif %}>
+        <summary>
+          <span class="account-ident">
+            <span class="account-avatar"><i data-lucide="user-plus"></i></span>
+            <span class="account-name"><strong>新建用户</strong><small>账号绑定以后也可以调整</small></span>
+          </span>
+          <i class="fold-chevron" data-lucide="chevron-down"></i>
+        </summary>
+        <div class="fold-body">
+          <form method="post" action="/admin/users/create" class="form-stack">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div class="form-grid">
+              <label class="field"><span>用户名</span><input type="text" name="username" pattern="[A-Za-z0-9_.-]+" required><small>字母、数字、下划线、点或短横线</small></label>
+              <label class="field"><span>初始密码</span><input type="password" name="password" autocomplete="new-password" required></label>
+            </div>
+            <label class="check"><input type="checkbox" name="enabled" checked><span>允许登录</span></label>
+            <fieldset>
+              <legend>分配账号（可多选，也可以先不选）</legend>
+              <div class="check-grid">
+                {% for account in all_accounts %}
+                <label class="check"><input type="checkbox" name="account_refs" value="{{ account.account_ref }}"><span>{{ account.username }}（{{ account.unique_id }}）</span></label>
+                {% else %}
+                <p class="muted compact">当前没有可分配的抖音账号。</p>
+                {% endfor %}
+              </div>
+            </fieldset>
+            <div class="form-actions"><button class="button button-primary" type="submit"><i data-lucide="user-plus"></i><span>创建用户</span></button></div>
+          </form>
+        </div>
+      </details>
+
+      <div class="user-list">
+        {% for web_user in web_users %}
+        <details class="fold">
+          <summary>
+            <span class="account-ident">
+              <span class="account-avatar">{{ (web_user.username or "U")[:1] }}</span>
+              <span class="account-name"><strong>{{ web_user.username }}</strong><small>{{ web_user.account_refs|length }} 个绑定账号</small></span>
+            </span>
+            <span class="summary-metrics"><span class="pill {% if web_user.enabled %}success{% else %}warning{% endif %}">{% if web_user.enabled %}可登录{% else %}已停用{% endif %}</span></span>
+            <i class="fold-chevron" data-lucide="chevron-down"></i>
+          </summary>
+          <div class="fold-body">
+            <form method="post" action="/admin/users/{{ web_user.username }}/update" class="form-stack">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <div class="form-grid">
+                <label class="field"><span>用户名</span><input type="text" name="new_username" value="{{ web_user.username }}" pattern="[A-Za-z0-9_.-]+" required></label>
+                <label class="field"><span>重置密码（留空不修改）</span><input type="password" name="password" autocomplete="new-password"></label>
+              </div>
+              <label class="check"><input type="checkbox" name="enabled" {% if web_user.enabled %}checked{% endif %}><span>允许登录</span></label>
+              <fieldset>
+                <legend>绑定账号（全部不选表示解除所有绑定）</legend>
+                <div class="check-grid">
+                  {% for account in all_accounts %}
+                  <label class="check"><input type="checkbox" name="account_refs" value="{{ account.account_ref }}" {% if account.account_ref in web_user.account_refs %}checked{% endif %}><span>{{ account.username }}（{{ account.unique_id }}）</span></label>
+                  {% else %}
+                  <p class="muted compact">当前没有可分配的抖音账号。</p>
+                  {% endfor %}
+                </div>
+              </fieldset>
+              <div class="form-actions"><button class="button button-primary" type="submit"><i data-lucide="check"></i><span>保存用户</span></button></div>
+            </form>
+            <form method="post" action="/admin/users/{{ web_user.username }}/delete" data-confirm-title="删除 Web 用户" data-confirm="只删除 Web 用户并解除账号绑定，不删除抖音账号数据。确认继续吗？" data-confirm-accept="确认删除">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button class="button button-danger button-sm" type="submit"><i data-lucide="trash-2"></i><span>删除用户</span></button>
+            </form>
+          </div>
+        </details>
+        {% endfor %}
+      </div>
+    </section>
+  </div>
+</div>
+{% else %}
+<section class="card settings-section" id="password" style="max-width: 560px">
+  <div class="card-head">
+    <div>
+      <h2><i data-lucide="key-round"></i>修改登录密码</h2>
+      <p>修改后需要用新密码重新登录。</p>
+    </div>
+  </div>
+  <form method="post" action="/account/password" class="form-stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="field"><span>新密码</span><input type="password" name="new_password" autocomplete="new-password" required></label>
+    <label class="field"><span>确认新密码</span><input type="password" name="confirm_password" autocomplete="new-password" required></label>
+    <div class="form-actions"><button class="button button-primary" type="submit"><i data-lucide="check"></i><span>保存密码</span></button></div>
+  </form>
+</section>
+{% endif %}
+{% endblock %}

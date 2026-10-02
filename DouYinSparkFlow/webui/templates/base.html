@@ -1,132 +1,118 @@
 {% set current_nav %}{% block nav_key %}dashboard{% endblock %}{% endset %}
+{% set nav = current_nav|trim %}
+{% set nav_attention = (ops.send_console.summary.today_attention_targets if ops is defined and ops and ops.send_console is defined else 0) or 0 %}
 <!doctype html>
-<html lang="zh-CN" data-theme="dark">
+<html lang="zh-CN">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="color-scheme" content="dark light">
-    <title>{% block title %}续火花{% endblock %}</title>
-    <link rel="stylesheet" href="/static/app.css?v=20260919-3">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cut">
+    <meta name="color-scheme" content="light dark">
+    <title>{% block title %}续火花{% endblock %} · SparkFlow</title>
+    <script>
+      // Runs before first paint: a stored choice wins, otherwise follow the system.
+      (function () {
+        var stored = null;
+        try { stored = localStorage.getItem("sparkflow-theme"); } catch (e) {}
+        var theme = stored === "light" || stored === "dark"
+          ? stored
+          : (window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+        document.documentElement.dataset.theme = theme;
+        // Old single-page bookmarks pointed at anchors on "/".
+        var legacy = {
+          "#account-management": "/accounts",
+          "#interactive-login-section": "/login-workspace",
+          "#config-panel": "/settings#messages",
+          "#ops-panel": "/settings#ops",
+          "#settings-panel": "/settings#system",
+          "#user-management": "/settings#users",
+          "#password-panel": "/settings#password"
+        };
+        if (location.pathname === "/" && legacy[location.hash]) {
+          location.replace(legacy[location.hash]);
+        }
+      })();
+    </script>
+    <link rel="stylesheet" href="/static/app.css?v=20261003-1">
   </head>
   <body data-page="{% block page_key %}dashboard{% endblock %}">
-    <header class="mobile-topbar">
-      <button class="icon-button" type="button" data-nav-toggle aria-label="打开导航" title="打开导航">
-        <i data-lucide="menu"></i>
-      </button>
-      <a class="mobile-brand" href="/">
-        <span class="brand-mark"><i data-lucide="flame"></i></span>
-        <span>续火花</span>
-      </a>
-      <button class="icon-button" type="button" data-theme-toggle aria-label="切换主题" title="切换主题">
-        <i data-lucide="sun" class="theme-light-icon"></i>
-        <i data-lucide="moon" class="theme-dark-icon"></i>
-      </button>
-    </header>
-
-    <div class="sidebar-backdrop" data-nav-close></div>
-    <div class="app-shell">
-      <aside class="sidebar" id="app-sidebar" aria-label="主导航">
-        <div class="sidebar-head">
-          <a class="brand" href="/">
-            <span class="brand-mark"><i data-lucide="flame"></i></span>
-            <span>
-              <strong class="brand-title">续火花</strong>
-              <small class="brand-subtitle">多账号控制平台</small>
-            </span>
+    <div class="shell">
+      <aside class="rail" aria-label="主导航">
+        <a class="brand" href="/">
+          <span class="brand-mark"><i data-lucide="flame"></i></span>
+          <span>续火花<small>SparkFlow</small></span>
+        </a>
+        <nav class="nav">
+          <a class="nav-item {% if nav == 'dashboard' %}active{% endif %}" href="/"><i data-lucide="sun"></i><span>今日</span></a>
+          <a class="nav-item {% if nav == 'send_console' %}active{% endif %}" href="/ops/send-console">
+            <i data-lucide="list-checks"></i><span>发送明细</span>
+            <span class="nav-badge" data-nav-attention {% if not nav_attention %}hidden{% endif %}>{{ nav_attention }}</span>
           </a>
-          <button class="icon-button sidebar-close" type="button" data-nav-close aria-label="关闭导航" title="关闭导航">
-            <i data-lucide="x"></i>
-          </button>
-        </div>
-
-        <nav class="nav-groups">
-          <section>
-            <p class="nav-group-title">工作台</p>
-            <div class="nav-group">
-              <a class="nav-item {% if current_nav|trim == 'dashboard' %}active{% endif %}" href="/">
-                <i data-lucide="layout-dashboard"></i><span>首页总览</span>
-              </a>
-              <a class="nav-item {% if current_nav|trim == 'send_console' %}active{% endif %}" href="/ops/send-console">
-                <i data-lucide="send"></i><span>发送控制台</span>
-              </a>
-              {% if is_admin %}
-              <a class="nav-item {% if current_nav|trim == 'logs' %}active{% endif %}" href="/ops/logs">
-                <i data-lucide="scroll-text"></i><span>发送记录</span>
-              </a>
-              {% endif %}
-            </div>
-          </section>
-
-          <section>
-            <p class="nav-group-title">管理</p>
-            <div class="nav-group">
-              <a class="nav-item" href="/#account-management">
-                <i data-lucide="users"></i><span>账号管理</span>
-              </a>
-              <a class="nav-item" href="/#interactive-login-section">
-                <i data-lucide="scan-line"></i><span>登录抖音账号</span>
-              </a>
-              {% if is_admin %}
-              <a class="nav-item" href="/#config-panel">
-                <i data-lucide="sliders-horizontal"></i><span>运行配置</span>
-              </a>
-              {% endif %}
-              {% if is_admin %}
-              <a class="nav-item" href="/#ops-panel">
-                <i data-lucide="wrench"></i><span>运维操作</span>
-              </a>
-              {% endif %}
-              {% if is_admin %}
-              <a class="nav-item" href="/#settings-panel">
-                <i data-lucide="settings"></i><span>系统设置</span>
-              </a>
-              {% endif %}
-            </div>
-          </section>
+          <a class="nav-item {% if nav == 'accounts' %}active{% endif %}" href="/accounts"><i data-lucide="users"></i><span>账号</span></a>
+          <a class="nav-item {% if nav == 'login_workspace' %}active{% endif %}" href="/login-workspace"><i data-lucide="scan-qr-code"></i><span>登录</span></a>
+          <div class="nav-label">{% if is_admin %}管理{% else %}个人{% endif %}</div>
+          <a class="nav-item {% if nav == 'settings' %}active{% endif %}" href="/settings"><i data-lucide="sliders-horizontal"></i><span>{% if is_admin %}设置{% else %}修改密码{% endif %}</span></a>
+          {% if is_admin %}
+          <a class="nav-item {% if nav == 'logs' %}active{% endif %}" href="/ops/logs"><i data-lucide="scroll-text"></i><span>运行日志</span></a>
+          {% endif %}
         </nav>
-
-        <div class="sidebar-footer">
-          <div class="user-summary">
-            <span class="user-avatar">{{ (current_user or "A")[:1] }}</span>
-            <span class="user-copy">
-              <strong>{{ current_user or "未登录" }}</strong>
-              <small>{% if is_admin %}管理员{% else %}普通用户{% endif %}</small>
-            </span>
+        <div class="rail-foot">
+          <div class="who">
+            <span class="who-avatar">{{ (current_user or "A")[:1] }}</span>
+            <span class="who-copy"><strong>{{ current_user or "未登录" }}</strong><small>{% if is_admin %}管理员{% else %}普通用户{% endif %}</small></span>
+            <button class="icon-button" type="button" data-theme-toggle aria-label="切换深浅色" title="切换深浅色">
+              <i data-lucide="moon" class="theme-light-icon"></i>
+              <i data-lucide="sun" class="theme-dark-icon"></i>
+            </button>
           </div>
           <form method="post" action="/logout">
-            <button class="button button-quiet button-block" type="submit">
-              <i data-lucide="log-out"></i><span>退出登录</span>
-            </button>
+            <button class="button button-ghost button-sm button-block" type="submit"><i data-lucide="log-out"></i><span>退出登录</span></button>
           </form>
         </div>
       </aside>
 
-      <main class="main-area">
-        <header class="page-header">
-          <div class="page-heading">
-            <h1>{% block page_title %}续火花{% endblock %}</h1>
-            <p>{% block page_subtitle %}多账号发送控制平台{% endblock %}</p>
-          </div>
-          <div class="page-header-actions">
-            <button class="icon-button desktop-theme-toggle" type="button" data-theme-toggle aria-label="切换主题" title="切换主题">
-              <i data-lucide="sun" class="theme-light-icon"></i>
-              <i data-lucide="moon" class="theme-dark-icon"></i>
+      <div class="main">
+        <header class="mobile-top">
+          <a class="brand" href="/"><span class="brand-mark"><i data-lucide="flame"></i></span><span>续火花</span></a>
+          <div class="mobile-top-actions">
+            {% if is_admin %}
+            <a class="icon-button" href="/ops/logs" aria-label="运行日志" title="运行日志"><i data-lucide="scroll-text"></i></a>
+            {% endif %}
+            <button class="icon-button" type="button" data-theme-toggle aria-label="切换深浅色" title="切换深浅色">
+              <i data-lucide="moon" class="theme-light-icon"></i>
+              <i data-lucide="sun" class="theme-dark-icon"></i>
             </button>
-            <div class="action-bar">
-              {% block topbar_actions %}{% endblock %}
-            </div>
+            <form method="post" action="/logout">
+              <button class="icon-button" type="submit" aria-label="退出登录" title="退出登录"><i data-lucide="log-out"></i></button>
+            </form>
           </div>
         </header>
 
-        {% if flash %}
-        <div class="flash flash-{{ flash.level }}" role="status">{{ flash.message }}</div>
-        {% endif %}
+        <main class="page">
+          <header class="page-head">
+            <div class="page-head-copy">
+              <div class="eyebrow">{% block eyebrow %}{% endblock %}</div>
+              <h1 class="page-title">{% block page_title %}续火花{% endblock %}</h1>
+              {% block page_sub %}{% endblock %}
+            </div>
+            <div class="actions">{% block topbar_actions %}{% endblock %}</div>
+          </header>
 
-        <div class="page-body">
+          {% if flash %}
+          <div class="flash flash-{{ flash.level }}" role="status">{{ flash.message }}</div>
+          {% endif %}
+
           {% block content %}{% endblock %}
-        </div>
-      </main>
+        </main>
+      </div>
     </div>
+
+    <nav class="tabbar" aria-label="底部导航">
+      <a class="{% if nav == 'dashboard' %}active{% endif %}" href="/"><i data-lucide="sun"></i>今日</a>
+      <a class="{% if nav == 'send_console' %}active{% endif %}" href="/ops/send-console"><i data-lucide="list-checks"></i>明细<span class="nav-badge" data-nav-attention {% if not nav_attention %}hidden{% endif %}>{{ nav_attention }}</span></a>
+      <a class="{% if nav == 'accounts' %}active{% endif %}" href="/accounts"><i data-lucide="users"></i>账号</a>
+      <a class="{% if nav == 'login_workspace' %}active{% endif %}" href="/login-workspace"><i data-lucide="scan-qr-code"></i>登录</a>
+      <a class="{% if nav in ['settings', 'logs'] %}active{% endif %}" href="/settings"><i data-lucide="sliders-horizontal"></i>{% if is_admin %}设置{% else %}密码{% endif %}</a>
+    </nav>
 
     <dialog class="confirm-dialog" id="confirm-dialog" aria-labelledby="confirm-title">
       <div class="confirm-icon"><i data-lucide="triangle-alert"></i></div>
@@ -139,7 +125,7 @@
     </dialog>
 
     <script defer src="/static/lucide.min.js?v=20260710"></script>
-    <script defer src="/static/app.js?v=20260919-3"></script>
+    <script defer src="/static/app.js?v=20261003-1"></script>
     {% block scripts %}{% endblock %}
   </body>
 </html>

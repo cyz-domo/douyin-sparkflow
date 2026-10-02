@@ -2,15 +2,17 @@
 
 {% block nav_key %}send_console{% endblock %}
 {% block page_key %}send-console{% endblock %}
-{% block title %}发送控制台{% endblock %}
-{% block page_title %}发送控制台{% endblock %}
-{% block page_subtitle %}异常优先查看，健康账号默认收起{% endblock %}
+{% block title %}发送明细{% endblock %}
+
+{% block eyebrow %}
+<span>{{ ops.send_console.nowDisplay or "" }}</span>
+<span class="live" data-overview-live-state>实时</span>
+{% endblock %}
+{% block page_title %}发送明细{% endblock %}
+{% block page_sub %}<p class="page-sub">每个好友今天的发送结果，异常的可以单独重试。</p>{% endblock %}
 
 {% block topbar_actions %}
 {% set top_summary = ops.send_console.summary %}
-<a class="button button-quiet" href="/">
-  <i data-lucide="arrow-left"></i><span>返回首页</span>
-</a>
 <form
   method="post"
   action="/ops/run-failed"
@@ -21,13 +23,12 @@
 >
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <button
-    class="button button-soft"
+    class="button button-quiet"
     type="submit"
     data-action-count-source="attention"
     {% if ops.task_lock.running or top_summary.today_attention_targets == 0 %}disabled{% endif %}
   >
-    <i data-lucide="refresh-cw"></i>
-    <span>补发异常 <b data-action-count>{{ top_summary.today_attention_targets }}</b></span>
+    <i data-lucide="rotate-ccw"></i><span>补发异常</span><b class="count-badge" data-action-count>{{ top_summary.today_attention_targets }}</b>
   </button>
 </form>
 <form
@@ -45,8 +46,7 @@
     data-action-count-source="pending"
     {% if ops.task_lock.running or (top_summary.today_pending_targets + top_summary.today_unprocessed_targets) == 0 %}disabled{% endif %}
   >
-    <i data-lucide="send"></i>
-    <span>补发待发送 <b data-action-count>{{ top_summary.today_pending_targets + top_summary.today_unprocessed_targets }}</b></span>
+    <i data-lucide="send"></i><span>补发待发送</span><b class="count-badge" data-action-count>{{ top_summary.today_pending_targets + top_summary.today_unprocessed_targets }}</b>
   </button>
 </form>
 {% endblock %}
@@ -55,7 +55,7 @@
 {% set send_console = ops.send_console %}
 {% set summary = send_console.summary %}
 
-<div class="console-shell" data-overview-root>
+<div data-overview-root>
   <div
     class="status-banner {% if ops.task_lock.running %}warning{% elif ops.task_lock.stale %}info{% else %}success{% endif %}"
     data-task-banner
@@ -72,26 +72,23 @@
         {% endif %}
       </span>
     </strong>
-    <span class="pill info" data-overview-live-state>实时</span>
   </div>
 
-  <div class="status-banner info refresh-notice" data-refresh-notice>
+  <div class="status-banner refresh-notice" data-refresh-notice>
     <strong><i data-lucide="circle-check"></i><span>任务已结束，刷新后可查看最新目标级结果。</span></strong>
-    <button class="button button-quiet" type="button" data-refresh-page>
+    <button class="button button-quiet button-sm" type="button" data-refresh-page>
       <i data-lucide="refresh-cw"></i><span>刷新详情</span>
     </button>
   </div>
 
-  <div class="status-banner {% if summary.today_attention_targets %}warning{% else %}success{% endif %}" data-today-summary>
-    <strong>
-      <i data-lucide="{% if summary.today_attention_targets %}triangle-alert{% else %}circle-check{% endif %}"></i>
-      <span>
-        今日结论：强确认 {{ summary.today_confirmed_targets }} · 仅页面回显 {{ summary.today_page_echo_targets }} · 仅回执未确认 {{ summary.today_receipt_only_targets }} ·
-        待核验 {{ summary.today_unconfirmed_targets }} · 失败 {{ summary.today_failed_targets }} ·
-        受账号阻断 {{ summary.today_account_blocked_targets }} · 待发送 {{ summary.today_pending_targets + summary.today_unprocessed_targets }}
-        （共 {{ summary.total_targets }} 个目标，{{ summary.enabled_accounts }} 个启用账号）
-      </span>
-    </strong>
+  <div class="callout {% if not summary.today_attention_targets %}good{% endif %}" data-today-summary>
+    <i data-lucide="{% if summary.today_attention_targets %}triangle-alert{% else %}circle-check{% endif %}"></i>
+    <p>
+      今日结论：强确认 {{ summary.today_confirmed_targets }} · 仅页面回显 {{ summary.today_page_echo_targets }} · 仅回执未确认 {{ summary.today_receipt_only_targets }} ·
+      待核验 {{ summary.today_unconfirmed_targets }} · 失败 {{ summary.today_failed_targets }} ·
+      受账号阻断 {{ summary.today_account_blocked_targets }} · 待发送 {{ summary.today_pending_targets + summary.today_unprocessed_targets }}
+      （共 {{ summary.total_targets }} 个目标，{{ summary.enabled_accounts }} 个启用账号）
+    </p>
   </div>
 
   <section class="metric-grid" aria-label="发送状态汇总">
@@ -119,16 +116,15 @@
     </article>
   </section>
 
-  <section class="dashboard-section">
-    <div class="section-header">
+  <section>
+    <div class="section-head">
       <div>
-        <h2 class="section-title">账号明细</h2>
-        <p class="muted compact">异常账号自动展开；成功、异常和待发送分开查看。</p>
+        <h2>账号明细</h2>
+        <p>有异常的账号自动展开；成功、异常和待发送分开查看。</p>
       </div>
-      <span class="pill">{{ send_console.nowDisplay }}</span>
     </div>
 
-    <div class="account-console-list">
+    <div>
       {% for account in send_console.accounts %}
       {% set exception_count = account.unconfirmed_targets|length + account.failed_targets|length + account.account_blocked_targets|length %}
       {% set success_count = account.confirmed_targets|length %}
@@ -137,7 +133,7 @@
       {% set waiting_targets = account.pending_targets + account.unprocessed_targets %}
       {% set default_segment = "exceptions" if exception_count else ("success" if success_count else ("page_echo" if page_echo_count else ("receipt_only" if receipt_only_count else "pending"))) %}
       <details
-        class="account-console state-{{ account.state }}"
+        class="fold state-{{ account.state }}"
         id="account-{{ account.unique_id }}"
         data-segment-owner
         data-account-overview="{{ account.unique_id }}"
@@ -151,16 +147,16 @@
               <small>{{ account.confirmed_targets|length }}/{{ account.total_targets }} 已强确认</small>
             </span>
           </span>
-          <span class="account-console-metrics">
+          <span class="summary-metrics">
             <span class="status-chip success">已确认 <b data-account-confirmed>{{ success_count }}</b></span>
             {% if exception_count %}<span class="status-chip danger">需处理 <b data-account-attention>{{ exception_count }}</b></span>{% endif %}
             {% if waiting_targets|length %}<span class="status-chip warning">待发送 <b data-account-pending>{{ waiting_targets|length }}</b></span>{% endif %}
             {% if account.account_paused %}<span class="status-chip danger">账号暂停</span>{% endif %}
           </span>
-          <i class="summary-chevron" data-lucide="chevron-down"></i>
+          <i class="fold-chevron" data-lucide="chevron-down"></i>
         </summary>
 
-        <div class="account-console-body">
+        <div class="fold-body">
           {% if account.warnings %}
           <div class="warning-box">
             {% for warning in account.warnings %}<div>{{ warning.message }}</div>{% endfor %}
@@ -174,7 +170,7 @@
           </div>
           {% endif %}
 
-          <div class="account-meta-strip">
+          <div class="meta-strip">
             <span>
               好友索引：
               {% if account.friend_index_meta.lastScanAt %}
@@ -219,7 +215,7 @@
                 <form method="post" action="/accounts/{{ account.unique_id }}/retry-target">
                   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                   <input type="hidden" name="target" value="{{ item.target }}">
-                  <button class="button button-soft" type="submit"><i data-lucide="refresh-cw"></i><span>重试</span></button>
+                  <button class="button button-soft button-sm" type="submit"><i data-lucide="refresh-cw"></i><span>重试</span></button>
                 </form>
               </article>
               {% endfor %}
@@ -236,7 +232,7 @@
                 <form method="post" action="/accounts/{{ account.unique_id }}/retry-target">
                   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                   <input type="hidden" name="target" value="{{ item.target }}">
-                  <button class="button button-soft" type="submit"><i data-lucide="refresh-cw"></i><span>重试</span></button>
+                  <button class="button button-soft button-sm" type="submit"><i data-lucide="refresh-cw"></i><span>重试</span></button>
                 </form>
               </article>
               {% endfor %}
@@ -253,7 +249,7 @@
                 <form method="post" action="/accounts/{{ account.unique_id }}/retry-target">
                   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                   <input type="hidden" name="target" value="{{ item.target }}">
-                  <button class="button button-soft" type="submit"><i data-lucide="refresh-cw"></i><span>重试</span></button>
+                  <button class="button button-soft button-sm" type="submit"><i data-lucide="refresh-cw"></i><span>重试</span></button>
                 </form>
               </article>
               {% endfor %}
@@ -283,7 +279,7 @@
                 >
                   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                   <input type="hidden" name="target" value="{{ item.target }}">
-                  <button class="button button-quiet" type="submit"><i data-lucide="flag"></i><span>待核验</span></button>
+                  <button class="button button-ghost button-sm" type="submit"><i data-lucide="flag"></i><span>标记待核验</span></button>
                 </form>
               </article>
               {% else %}
@@ -314,7 +310,7 @@
                 >
                   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                   <input type="hidden" name="target" value="{{ item.target }}">
-                  <button class="button button-quiet" type="submit"><i data-lucide="repeat"></i><span>不确定，重发</span></button>
+                  <button class="button button-ghost button-sm" type="submit"><i data-lucide="repeat"></i><span>不确定，重发</span></button>
                 </form>
               </article>
               {% else %}
@@ -345,7 +341,7 @@
                 >
                   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                   <input type="hidden" name="target" value="{{ item.target }}">
-                  <button class="button button-quiet" type="submit"><i data-lucide="repeat"></i><span>不确定，重发</span></button>
+                  <button class="button button-ghost button-sm" type="submit"><i data-lucide="repeat"></i><span>不确定，重发</span></button>
                 </form>
               </article>
               {% else %}
@@ -374,7 +370,7 @@
         </div>
       </details>
       {% else %}
-      <div class="empty-state">当前没有启用账号。</div>
+      <div class="empty-state">还没有启用的账号。</div>
       {% endfor %}
     </div>
   </section>

@@ -1,161 +1,49 @@
 {% extends "base.html" %}
 
 {% block nav_key %}logs{% endblock %}
-{% block title %}运行日志 | 抖音多账号续火花控制台{% endblock %}
+{% block page_key %}logs{% endblock %}
+{% block title %}运行日志{% endblock %}
+
+{% block eyebrow %}<span class="logs-meta"><span class="logs-dot" id="logs-live-dot"></span><span id="logs-status-text">最近更新：刚刚</span></span>{% endblock %}
 {% block page_title %}运行日志{% endblock %}
-{% block page_subtitle %}登录同步 · 发送过程 · 容器状态{% endblock %}
+{% block page_sub %}<p class="page-sub">最近 400 行任务输出：登录同步、发送过程和容器状态。</p>{% endblock %}
 
 {% block topbar_actions %}
-<a class="ghost-button" href="/">⌂ 返回首页</a>
-<a class="ghost-button" href="/ops/send-console">✦ 发送控制台</a>
+<button type="button" class="button button-quiet" id="logs-refresh-btn"><i data-lucide="refresh-cw"></i><span>刷新</span></button>
+<a class="button button-quiet" id="logs-download-btn" href="/ops/logs/download"><i data-lucide="download"></i><span>下载日志</span></a>
 {% endblock %}
 
 {% block content %}
-<style>
-  .logs-toolbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 14px;
-    flex-wrap: wrap;
-    margin-bottom: 16px;
-  }
-  .logs-toolbar__left {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    flex-wrap: wrap;
-  }
-  .logs-meta {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    color: var(--text-soft);
-    font-size: 13px;
-    font-weight: 600;
-  }
-  .logs-meta .dot {
-    width: 9px;
-    height: 9px;
-    border-radius: 50%;
-    background: var(--fire-grad);
-    box-shadow: 0 0 0 4px rgba(255, 122, 61, 0.14);
-  }
-  .logs-meta .dot.live {
-    background: linear-gradient(135deg, #18a558, #4fd08a);
-    box-shadow: 0 0 0 4px rgba(24, 165, 88, 0.16);
-    animation: livePulse 1.6s ease-in-out infinite;
-  }
-  @keyframes livePulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.45; }
-  }
-  .toggle-switch {
-    display: inline-flex;
-    align-items: center;
-    gap: 10px;
-    cursor: pointer;
-    user-select: none;
-    font-size: 13px;
-    font-weight: 700;
-    color: var(--text);
-  }
-  .toggle-track {
-    width: 42px;
-    height: 24px;
-    border-radius: 999px;
-    background: var(--border-strong);
-    position: relative;
-    transition: background 0.18s ease;
-    flex: 0 0 42px;
-  }
-  .toggle-track::after {
-    content: "";
-    position: absolute;
-    top: 3px;
-    left: 3px;
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    background: #fff;
-    box-shadow: 0 2px 5px rgba(20, 35, 70, 0.18);
-    transition: transform 0.18s ease;
-  }
-  .toggle-switch input { display: none; }
-  .toggle-switch input:checked + .toggle-track {
-    background: linear-gradient(180deg, var(--primary), var(--primary-strong));
-  }
-  .toggle-switch input:checked + .toggle-track::after {
-    transform: translateX(18px);
-  }
-  .logs-code {
-    margin: 0;
-    border-radius: var(--radius-md);
-    background: #0f1728;
-    color: #d8e2fb;
-    padding: 18px 20px;
-    overflow: auto;
-    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-    font-size: 12.5px;
-    line-height: 1.75;
-    min-height: 420px;
-    max-height: 70vh;
-    white-space: pre-wrap;
-    word-break: break-word;
-    tab-size: 2;
-  }
-  .logs-code:empty::before {
-    content: "暂无日志输出";
-    color: #5f6f8c;
-  }
-  .logs-empty {
-    padding: 60px 24px;
-    text-align: center;
-    border-radius: var(--radius-md);
-    border: 1px dashed var(--border-strong);
-    background: var(--empty-bg);
-    color: var(--text-soft);
-  }
-</style>
+{% set has_log = log_tail and log_tail.strip() %}
+{% if (log_summary.levels or {}) or (log_summary.categories or []) %}
+<div class="logs-chips">
+  {% for level, count in (log_summary.levels or {}).items() %}
+  <span class="pill {% if level in ['ERROR', 'CRITICAL'] %}danger{% elif level == 'WARNING' %}warning{% else %}info{% endif %}">{{ level }} {{ count }}</span>
+  {% endfor %}
+  {% for item in (log_summary.categories or [])[:5] %}
+  <span class="pill warning">{{ item.label }} {{ item.count }}</span>
+  {% endfor %}
+</div>
+{% endif %}
 
-<section class="panel">
-  <div class="panel-header">
-    <div>
-      <h2>详细日志</h2>
-      <p class="muted compact">展示最近的任务输出，便于检查登录同步、发送过程和容器状态。</p>
-    </div>
+<div class="logs-toolbar">
+  <div class="logs-toolbar-group">
+    <label class="toggle-switch" title="每 5 秒自动刷新日志">
+      <input type="checkbox" id="logs-autorefresh">
+      <span class="toggle-track"></span>
+      <span>自动刷新</span>
+    </label>
+    <span class="logs-meta"><span id="logs-line-count">{{ (log_tail|trim).splitlines()|length if has_log else 0 }} 行</span></span>
   </div>
+  <input type="search" id="logs-filter" placeholder="只看包含关键字的行（分类 / 账号 / 关键字）" aria-label="过滤日志">
+</div>
 
-  <div class="logs-toolbar">
-    <div class="logs-toolbar__left">
-      <span class="logs-meta"><span class="dot" id="logs-live-dot"></span><span id="logs-status-text">最近更新：刚刚</span></span>
-      <span class="logs-meta"><span class="dot"></span><span id="logs-line-count">{{ (log_tail|trim).splitlines()|length }} 行</span></span>
-      {% for level, count in (log_summary.levels or {}).items() %}
-      <span class="status-chip {% if level in ['ERROR', 'CRITICAL'] %}danger{% elif level == 'WARNING' %}warning{% else %}info{% endif %}">{{ level }} {{ count }}</span>
-      {% endfor %}
-      {% for item in (log_summary.categories or [])[:5] %}
-      <span class="status-chip warning">{{ item.label }} {{ item.count }}</span>
-      {% endfor %}
-    </div>
-    <div class="logs-toolbar__left">
-      <label class="toggle-switch" title="每 5 秒自动刷新日志">
-        <input type="checkbox" id="logs-autorefresh">
-        <span class="toggle-track"></span>
-        <span>自动刷新</span>
-      </label>
-      <input type="search" id="logs-filter" placeholder="只看包含…的行（分类 / 账号 / 关键字）">
-      <button type="button" class="ghost-button" id="logs-refresh-btn">↻ 刷新</button>
-      <a class="ghost-button" id="logs-download-btn" href="/ops/logs/download">⬇ 下载日志</a>
-    </div>
-  </div>
+{# Both nodes are always rendered so a log that appears later can still be shown. #}
+<pre class="logs-code" id="logs-code" {% if not has_log %}hidden{% endif %}>{{ log_tail if has_log else "" }}</pre>
+<div class="empty-state" id="logs-empty" {% if has_log %}hidden{% endif %}>当前没有日志输出。任务运行后这里会显示最新内容。</div>
+{% endblock %}
 
-  {% if log_tail and log_tail.strip() %}
-  <pre class="logs-code" id="logs-code">{{ log_tail }}</pre>
-  {% else %}
-  <div class="logs-empty" id="logs-empty">当前没有日志输出。任务运行后这里会实时显示。</div>
-  {% endif %}
-</section>
-
+{% block scripts %}
 <script>
   (() => {
     const codeEl = document.getElementById("logs-code");
@@ -165,7 +53,11 @@
     const liveDot = document.getElementById("logs-live-dot");
     const toggle = document.getElementById("logs-autorefresh");
     const refreshBtn = document.getElementById("logs-refresh-btn");
+    const filterEl = document.getElementById("logs-filter");
     let timer = null;
+    // Start from the server-rendered text, so filtering before the first
+    // refresh narrows the visible log instead of wiping it.
+    let rawText = codeEl ? codeEl.textContent : "";
 
     const fmtTime = () => {
       const d = new Date();
@@ -173,50 +65,29 @@
       return `最近更新：${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
     };
 
-    const filterEl = document.getElementById("logs-filter");
-    let rawText = "";
-
     const applyFilter = () => {
       const query = String((filterEl && filterEl.value) || "").trim().toLowerCase();
-      const lines = rawText ? rawText.split(/\r?\n/) : [];
-      const shown = query
-        ? lines.filter((line) => line.toLowerCase().includes(query))
-        : lines;
-      if (codeEl) codeEl.textContent = shown.join("\n");
-      if (lineEl) {
-        lineEl.textContent = query
-          ? `显示 ${shown.length} / 共 ${lines.length} 行`
-          : `${lines.length} 行`;
+      const lines = rawText.trim() ? rawText.split(/\r?\n/) : [];
+      const shown = query ? lines.filter((line) => line.toLowerCase().includes(query)) : lines;
+      const has = lines.length > 0;
+      if (codeEl) {
+        codeEl.hidden = !has;
+        codeEl.textContent = shown.join("\n");
       }
-    };
-
-    const renderBody = (text) => {
-      rawText = text || "";
-      const has = !!(rawText && rawText.trim());
-      if (has) {
-        if (emptyEl) emptyEl.style.display = "none";
-        if (codeEl) codeEl.style.display = "";
-        applyFilter();
-      } else {
-        if (codeEl) codeEl.style.display = "none";
-        if (emptyEl) emptyEl.style.display = "";
-        if (lineEl) lineEl.textContent = "0 行";
+      if (emptyEl) emptyEl.hidden = has;
+      if (lineEl) {
+        lineEl.textContent = query ? `显示 ${shown.length} / 共 ${lines.length} 行` : `${lines.length} 行`;
       }
     };
 
     const refresh = async () => {
       try {
-        const res = await fetch("/ops/logs", { credentials: "same-origin", headers: { "Accept": "text/html" } });
+        const res = await fetch("/ops/logs", { credentials: "same-origin", headers: { Accept: "text/html" }, cache: "no-store" });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const html = await res.text();
-        const doc = new DOMParser().parseFromString(html, "text/html");
+        const doc = new DOMParser().parseFromString(await res.text(), "text/html");
         const fetched = doc.getElementById("logs-code");
-        const fetchedEmpty = doc.getElementById("logs-empty");
-        if (fetched) {
-          renderBody(fetched.textContent);
-        } else if (fetchedEmpty) {
-          renderBody("");
-        }
+        rawText = fetched ? fetched.textContent : "";
+        applyFilter();
         if (statusEl) statusEl.textContent = fmtTime();
       } catch (err) {
         if (statusEl) statusEl.textContent = `刷新失败：${err.message}`;
@@ -224,7 +95,7 @@
     };
 
     const setLive = (on) => {
-      if (liveDot) liveDot.classList.toggle("live", on);
+      if (liveDot) liveDot.classList.toggle("is-live", on);
       if (timer) { clearInterval(timer); timer = null; }
       if (on) {
         timer = setInterval(refresh, 5000);

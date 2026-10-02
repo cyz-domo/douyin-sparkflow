@@ -1,0 +1,142 @@
+{% extends "base.html" %}
+
+{% block nav_key %}accounts{% endblock %}
+{% block page_key %}accounts{% endblock %}
+{% block title %}账号{% endblock %}
+
+{% block eyebrow %}<span>{{ accounts|length }} 个抖音账号</span>{% endblock %}
+{% block page_title %}账号与好友{% endblock %}
+{% block page_sub %}<p class="page-sub">管理每个账号要续火花的好友，以及登录态和启用状态。</p>{% endblock %}
+
+{% block topbar_actions %}
+<button class="button button-quiet" type="button" data-refresh-all-friends>
+  <i data-lucide="refresh-cw"></i><span>刷新全部好友</span>
+</button>
+<a class="button button-primary" href="/login-workspace">
+  <i data-lucide="user-plus"></i><span>添加账号</span>
+</a>
+{% endblock %}
+
+{% block content %}
+<p class="notice-inline" data-refresh-all-friends-summary style="margin-bottom: 16px" hidden></p>
+
+<div>
+  {% set duplicates = duplicate_display_names(accounts) %}
+  {% for account in accounts %}
+  {% set duplicate_count = duplicates.get(account.username, 0) %}
+  {% set enabled = account.enabled|default(true) %}
+  <details class="fold" id="account-{{ account.unique_id }}">
+    <summary>
+      <span class="account-ident">
+        <span class="account-avatar">{{ (account.username or "A")[:1] }}</span>
+        <span class="account-name">
+          <strong>{{ account.username }}</strong>
+          <small>{{ account.targets|length }} 个目标好友 · {{ account.friends_cache|default([], true)|length }} 个缓存好友</small>
+        </span>
+      </span>
+      <span class="summary-metrics">
+        {% if duplicate_count > 1 %}
+        <span class="pill warning" title="同名账号通常来自重复保存登录态，建议确认后合并或删除多余的记录">同名 {{ duplicate_count }} 个</span>
+        {% endif %}
+        <span class="pill {% if enabled %}success{% else %}warning{% endif %}">{% if enabled %}已启用{% else %}已停用{% endif %}</span>
+      </span>
+      <i class="fold-chevron" data-lucide="chevron-down"></i>
+    </summary>
+    <div class="fold-body">
+      <form method="post" action="/accounts/{{ account.unique_id }}/update" class="form-stack">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="form-grid">
+          <label class="field">
+            <span>显示名</span>
+            <input type="text" name="username" value="{{ account.username }}">
+          </label>
+          <div class="field">
+            <span>自动续火花</span>
+            <label class="check"><input type="checkbox" name="enabled" {% if enabled %}checked{% endif %}><span>启用这个账号的自动发送</span></label>
+          </div>
+        </div>
+        <div
+          class="friend-picker"
+          data-account-id="{{ account.unique_id }}"
+          data-refresh-url="/accounts/{{ account.unique_id }}/friends/refresh"
+          data-csrf-token="{{ csrf_token }}"
+        >
+          <div class="friend-picker-toolbar">
+            <div>
+              <strong>选择目标好友</strong>
+              <p class="friend-picker-status">
+                {% if account.friends_cache_updated_at %}上次刷新：{{ account.friends_cache_updated_at }}{% if cache_age_label(account.friends_cache_updated_at) %}（{{ cache_age_label(account.friends_cache_updated_at) }}）{% endif %}{% else %}尚未读取好友列表{% endif %}
+              </p>
+            </div>
+            <button class="button button-quiet button-sm friend-refresh-button" type="button">
+              <i data-lucide="refresh-cw"></i><span>刷新好友列表</span>
+            </button>
+          </div>
+          <input class="friend-search-input" type="search" placeholder="搜索好友昵称" aria-label="搜索好友">
+          <p class="friend-picker-summary">已选 0 人</p>
+          <div class="friend-picker-list"></div>
+          <script type="application/json" id="friends-cache-{{ account.unique_id }}">{{ account.friends_cache|default([], true)|tojson }}</script>
+          <script type="application/json" id="selected-targets-{{ account.unique_id }}">{{ account.targets|default([], true)|tojson }}</script>
+        </div>
+        <label class="field">
+          <span>目标好友（每行一个，和上面的选择同步）</span>
+          <textarea class="targets-textarea" name="targets" rows="4">{{ account.targets|default([], true)|join('\n') }}</textarea>
+        </label>
+        <div class="form-actions">
+          <button class="button button-primary" type="submit"><i data-lucide="check"></i><span>保存</span></button>
+          <a class="button button-quiet" href="/login-workspace?relogin={{ account.unique_id|urlencode }}">
+            <i data-lucide="scan-qr-code"></i><span>重新登录</span>
+          </a>
+        </div>
+      </form>
+      <div class="form-actions" style="padding-top: 14px; border-top: 1px solid var(--line)">
+        <form method="post" action="/accounts/{{ account.unique_id }}/toggle-enabled">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="button button-ghost button-sm" type="submit">
+            <i data-lucide="{% if enabled %}pause{% else %}play{% endif %}"></i>
+            <span>{% if enabled %}停用自动发送{% else %}启用自动发送{% endif %}</span>
+          </button>
+        </form>
+        {% if duplicate_count > 1 %}
+        <form
+          method="post"
+          action="/accounts/{{ account.unique_id }}/merge-into"
+          class="form-actions"
+          data-confirm-title="合并重复账号"
+          data-confirm="将把“{{ account.username }}”这条记录的目标与发送账本合并到所选账号，然后删除这条重复记录。此操作无法撤销。"
+          data-confirm-accept="确认合并"
+        >
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <select class="inline-select" name="target_account_ref" aria-label="保留哪个账号">
+            {% for other in accounts %}
+            {% if other.unique_id != account.unique_id and other.username == account.username %}
+            <option value="{{ other.account_ref }}">保留 {{ other.username }}（{{ other.unique_id }}）</option>
+            {% endif %}
+            {% endfor %}
+          </select>
+          <button class="button button-ghost button-sm" type="submit"><i data-lucide="combine"></i><span>合并到该账号</span></button>
+        </form>
+        {% endif %}
+        {% if is_admin %}
+        <form
+          method="post"
+          action="/accounts/{{ account.unique_id }}/delete"
+          style="margin-left: auto"
+          data-confirm-title="删除账号"
+          data-confirm="将删除账号“{{ account.username }}”及其目标、发送账本和失败记录。此操作无法撤销。"
+          data-confirm-accept="确认删除"
+        >
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="button button-danger button-sm" type="submit"><i data-lucide="trash-2"></i><span>删除账号</span></button>
+        </form>
+        {% endif %}
+      </div>
+    </div>
+  </details>
+  {% else %}
+  <div class="empty-state">
+    还没有账号。<a href="/login-workspace">去登录页扫码添加</a>第一个抖音账号。
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}

@@ -426,11 +426,11 @@ class WebUiSafetyTests(unittest.TestCase):
         self.assertEqual("no-store, max-age=0", response.headers["cache-control"])
         self.assertEqual(b"fake-png", response.content)
 
-    def test_dashboard_contains_mobile_qr_controls(self):
-        dashboard = (Path(app_module.TEMPLATES_DIR) / "dashboard.html").read_text(encoding="utf-8")
-        self.assertIn("data-login-qr", dashboard)
-        self.assertIn("data-refresh-login-qr", dashboard)
-        self.assertIn("/login-desktop/qr", dashboard)
+    def test_login_workspace_contains_mobile_qr_controls(self):
+        page = (Path(app_module.TEMPLATES_DIR) / "login_workspace.html").read_text(encoding="utf-8")
+        self.assertIn("data-login-qr", page)
+        self.assertIn("data-refresh-login-qr", page)
+        self.assertIn("/login-desktop/qr", page)
 
     def test_login_workspace_loads_inside_dashboard_frame(self):
         script = (Path(app_module.STATIC_DIR) / "app.js").read_text(encoding="utf-8")
@@ -526,12 +526,12 @@ class WebUiSafetyTests(unittest.TestCase):
 
         self.assertNotIn("server_password", public)
         self.assertNotIn("session_secret", public)
-        dashboard = (
-            Path(app_module.TEMPLATES_DIR) / "dashboard.html"
-        ).read_text(encoding="utf-8")
-        self.assertNotIn("server_password", dashboard)
-        self.assertNotIn("server_username", dashboard)
-        self.assertNotIn("server_host", dashboard)
+        for template in Path(app_module.TEMPLATES_DIR).glob("*.html"):
+            text = template.read_text(encoding="utf-8")
+            with self.subTest(template=template.name):
+                self.assertNotIn("server_password", text)
+                self.assertNotIn("server_username", text)
+                self.assertNotIn("server_host", text)
 
 
 if __name__ == "__main__":

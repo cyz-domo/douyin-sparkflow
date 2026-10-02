@@ -1,0 +1,160 @@
+{% extends "base.html" %}
+
+{% block nav_key %}login_workspace{% endblock %}
+{% block page_key %}login-workspace{% endblock %}
+{% block title %}登录抖音账号{% endblock %}
+
+{% block eyebrow %}<span class="pill" id="login-desktop-runtime-state">待检查</span>{% endblock %}
+{% block page_title %}{% if relogin_account %}重新登录「{{ relogin_account.username }}」{% else %}登录抖音账号{% endif %}{% endblock %}
+{% block page_sub %}<p class="page-sub" id="login-desktop-status-text">正在检查登录工作区状态…</p>{% endblock %}
+
+{% block topbar_actions %}
+{% if relogin_account %}
+<button class="button button-primary login-desktop-open" type="button" data-relogin-unique-id="{{ relogin_account.unique_id }}" data-account-name="{{ relogin_account.username }}">
+  <i data-lucide="scan-qr-code"></i><span>打开登录工作区</span>
+</button>
+<button class="button button-soft login-desktop-save" type="button" data-relogin-unique-id="{{ relogin_account.unique_id }}" data-account-name="{{ relogin_account.username }}">
+  <i data-lucide="save"></i><span>保存登录态</span>
+</button>
+{% else %}
+<button class="button button-primary login-desktop-open" type="button" data-login-mode="add">
+  <i data-lucide="user-plus"></i><span>添加新账号</span>
+</button>
+<button class="button button-soft login-desktop-save" type="button" data-relogin-unique-id="" data-login-mode="add">
+  <i data-lucide="save"></i><span>保存新账号</span>
+</button>
+{% endif %}
+{% endblock %}
+
+{% block content %}
+{% if relogin_account %}
+<div class="relogin-banner">
+  <i data-lucide="refresh-ccw"></i>
+  <p>这次登录会覆盖账号 <b>{{ relogin_account.username }}</b> 的登录态，目标好友和发送记录都会保留。</p>
+  <a href="/login-workspace">改为添加新账号</a>
+</div>
+{% endif %}
+
+<section
+  id="interactive-login-section"
+  class="login-layout"
+>
+  <div
+    id="login-desktop-controls"
+    class="stack"
+    data-public-url="{{ login_desktop_public_url }}"
+    data-display-mode="{{ login_desktop_display_mode }}"
+    data-csrf-token="{{ csrf_token }}"
+  >
+    <div class="card qr-card">
+      <h3 class="card-title"><i data-lucide="smartphone"></i>用抖音 App 扫码</h3>
+      <div class="qr-frame">
+        <img class="login-qr-image" data-login-qr alt="抖音登录二维码" hidden>
+        <div class="qr-placeholder"><i data-lucide="qr-code"></i><span>点“{% if relogin_account %}打开登录工作区{% else %}添加新账号{% endif %}”后，二维码会显示在这里</span></div>
+      </div>
+      <p class="muted compact" data-login-qr-status>二维码会在登录工作区分配给你之后自动出现。</p>
+      <div class="form-actions" style="justify-content: center">
+        <button class="button button-quiet button-sm" type="button" data-refresh-login-qr>
+          <i data-lucide="refresh-cw"></i><span>刷新二维码</span>
+        </button>
+        <a class="button button-ghost button-sm" href="/login-desktop/qr" target="_blank" rel="noopener">
+          <i data-lucide="maximize-2"></i><span>单独打开</span>
+        </a>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 class="card-title"><i data-lucide="list-ordered"></i>怎么登录</h3>
+      <ol class="step-list">
+        <li>点右上角的“{% if relogin_account %}打开登录工作区{% else %}添加新账号{% endif %}”，排到你后会自动打开登录浏览器。</li>
+        <li>用抖音 App 扫左边的二维码；需要验证码时直接在右侧浏览器里操作。</li>
+        <li>登录成功后点“{% if relogin_account %}保存登录态{% else %}保存新账号{% endif %}”，好友列表会自动刷新。</li>
+      </ol>
+      <p class="muted compact" style="margin-top: 12px">登录过程中请停留在本页：离开或关闭页面会释放登录工作区，下一位用户就能使用。</p>
+      <div class="form-actions" style="margin-top: 16px">
+        <button
+          class="button button-ghost button-sm login-desktop-close"
+          type="button"
+          data-confirm-title="关闭登录界面"
+          data-confirm="当前未保存的登录过程会被关闭，登录界面会恢复初始状态。确认继续吗？"
+          data-confirm-accept="确认关闭"
+        >
+          <i data-lucide="x-circle"></i><span>关闭登录界面</span>
+        </button>
+        <button class="button button-ghost button-sm" type="button" data-copy-login-url>
+          <i data-lucide="copy"></i><span>复制地址</span>
+        </button>
+        {% if is_admin %}
+        <button
+          class="button button-danger button-sm login-desktop-reset"
+          type="button"
+          data-confirm-title="强制重置登录工作区"
+          data-confirm="会清理当前登录环境并切换队列中的下一位用户。确认继续吗？"
+          data-confirm-accept="确认重置"
+        >
+          <i data-lucide="rotate-ccw"></i><span>强制重置</span>
+        </button>
+        {% endif %}
+      </div>
+    </div>
+
+    <details class="fold" data-cookie-login>
+      <summary>
+        <span class="account-ident">
+          <span class="account-avatar"><i data-lucide="key-round"></i></span>
+          <span class="account-name"><strong>用 Cookie 登录</strong><small>不想扫码时，粘贴已登录浏览器导出的 Cookie</small></span>
+        </span>
+        <i class="fold-chevron" data-lucide="chevron-down"></i>
+      </summary>
+      <div class="fold-body">
+        <p class="muted compact">
+          支持扩展导出的 JSON 数组、<code>name=value; …</code> 请求头原串或单个 Cookie 值。保存前会在真实浏览器里验证，通过后才写入账号。
+        </p>
+        <label class="field">
+          <span>显示名（可选）</span>
+          <input type="text" data-cookie-display-name placeholder="留空则使用抖音昵称">
+        </label>
+        <label class="field">
+          <span>Cookie 内容</span>
+          <textarea data-cookie-input rows="4" placeholder="sessionid=...; sid_guard=... 或 [{&quot;name&quot;:&quot;sessionid&quot;,&quot;value&quot;:&quot;...&quot;}]"></textarea>
+        </label>
+        <label class="check">
+          <input type="checkbox" data-cookie-relogin-mode {% if relogin_account %}checked{% endif %}>
+          <span>覆盖指定账号的登录态（不勾选则自动匹配或新建）</span>
+        </label>
+        <label class="field" data-cookie-relogin-row {% if not relogin_account %}hidden{% endif %}>
+          <span>要覆盖的账号</span>
+          <select data-cookie-relogin-select>
+            {% for account in accounts %}
+            <option value="{{ account.unique_id }}" {% if relogin_account and account.unique_id == relogin_account.unique_id %}selected{% endif %}>{{ account.username }}{% if account.unique_id %}（{{ account.unique_id }}）{% endif %}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <div class="form-actions">
+          <button class="button button-soft" type="button" data-cookie-login-submit>
+            <i data-lucide="shield-check"></i><span>验证并保存</span>
+          </button>
+          <p class="muted compact" data-cookie-login-status>粘贴 Cookie 后点击“验证并保存”。</p>
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <div class="desktop-frame-wrap">
+    <div class="native-login-panel" data-native-login hidden>
+      <i data-lucide="monitor-up"></i>
+      <strong>本机登录浏览器已启动</strong>
+      <p class="muted compact">请在本机弹出的 Chromium 窗口里完成扫码，完成后回到这里点“保存”。</p>
+      <button class="button button-primary" type="button" data-focus-native-browser>
+        <i data-lucide="focus"></i><span>显示登录浏览器</span>
+      </button>
+    </div>
+    <iframe
+      class="desktop-frame"
+      data-login-frame
+      data-src="{{ login_desktop_public_url }}"
+      title="交互式登录浏览器"
+    ></iframe>
+  </div>
+</section>
+{% endblock %}
