@@ -453,7 +453,6 @@
       // Keep the server's grading (category / categoryLabel / retryable) so
       // callers can render an actionable message instead of a bare string.
       error.payload = data;
-      error.status = response.status;
       // 423 is the lease gate: this session no longer holds the login
       // workspace, which callers must recover from instead of reporting the
       // login-desktop service as broken.
@@ -513,6 +512,8 @@
         // re-fetching the QR code on every poll burns the single login-desktop
         // page lock and makes the whole login flow feel sluggish.
         lastPromotedTicket = workspace.ticket;
+        qrAutoRefreshes = 0;
+        recoverAttempts = 0;
         if (section && !section.open) section.open = true;
         loadFrame(true);
         qrPollStartedAt = Date.now();
@@ -541,12 +542,16 @@
       }
       return;
     }
-    setStatus("登录工作区当前空闲。点“添加新账号”，或在账号页选择“重新登录”。");
+    setStatus("登录工作区当前未分配给本会话（空闲或由其他会话占用）。点“添加新账号”，或在账号页选择“重新登录”。");
   };
 
   let qrPollStartedAt = 0;
   let lastPromotedTicket = "";
   let qrNotReadyAttempts = 0;
+  let qrAutoRefreshes = 0;
+  let recoveringLease = false;
+  let recoverAttempts = 0;
+  let acquiringWorkspace = false;
   const setQrButtons = (label, { busy = false, stopped = false } = {}) => {
     document.querySelectorAll("[data-refresh-login-qr]").forEach((button) => {
       const text = button.querySelector("span");
@@ -562,31 +567,13 @@
 
   // 423 means this session does not hold the login workspace lease. That is a
   // workspace-state problem, not a slow page: retrying blindly made the QR code
-  // spin forever and the noVNC frame never load. Drop the stale local view and
-  // re-read the real workspace state so the page can show it and offer actions.
+  // spin forever and the noVNC frame never load. Drop the stale local view,
+  // re-read the real workspace state and try to take the workspace back.
   const setRecoverVisible = (visible) => {
     document.querySelectorAll("[data-recover-login-workspace]").forEach((button) => {
       button.hidden = !visible;
     });
   };
-  const recoverLease = () => {
-    window.clearTimeout(qrRefreshTimer);
-    workspace = { state: "closed", active: false, position: 0, ticket: "" };
-    qrNotReadyAttempts = 0;
-    lastPromotedTicket = "";
-    closeFrame();
-    setRecoverVisible(true);
-    if (qrStatus) {
-      qrStatus.textContent = "本会话当前未持有登录工作区：请点上方的“打开登录工作区”重新申请，或在账号页选择“重新登录”。";
-    }
-    setQrButtons("刷新二维码");
-    pollStatus();
-  };
-  document.querySelectorAll("[data-recover-login-workspace]").forEach((button) => {
-    button.addEventListener("click", () => {
-      recoverLease();
-    });
-  });
 
   const refreshLoginQr = async (delay = 0, retries = 400) => {
     if (!qrImage || workspace.state !== "active" || !workspace.active) return;
@@ -623,11 +610,21 @@
           }
           // GET /qr only reads the page; only /qr/refresh can make the QR code
           // appear. When the page keeps reporting "not ready", ask for a refresh
-          // instead of polling forever and letting the user wait without a code.
+          // instead of polling forever -- but a bounded number of times, because
+          // every refresh reloads the shared Douyin login page and the operator
+          // may be scanning in the noVNC frame at that very moment.
           qrNotReadyAttempts += 1;
           if (qrNotReadyAttempts >= 4) {
             qrNotReadyAttempts = 0;
-            requestQrRefresh({ auto: true });
+            if (autoRefreshesExhausted()) {
+              if (qrStatus) {
+                qrStatus.textContent = (data.message || "浏览器仍未生成二维码") + " 已停止自动刷新，请点击“刷新二维码”重试。";
+              }
+              setQrButtons("已停止，点此重试", { stopped: true });
+              return;
+            }
+            qrAutoRefreshes += 1;
+            Promise.resolve(requestQrRefresh({ auto: true, retries: retries })).catch(() => {});
             return;
           }
           retryLater(data.message || "浏览器正在生成二维码");
@@ -696,11 +693,14 @@
       if (response.status === 423) {
         // The lease is not held by this session any more. Showing "check the
         // login-desktop service" here pointed operators at a container that was
-        // perfectly healthy, so name the real condition and offer the fix.
-        workspace = { state: "closed", active: false, position: 0, ticket: "" };
-        setRecoverVisible(true);
-        closeFrame();
-        setStatus("本会话当前未持有登录工作区，请点上方的“打开登录工作区”重新申请。", "warning");
+        // perfectly healthy. The recovery path hides the stale frame, re-reads
+        // the workspace state and takes the workspace back with a bounded
+        // backoff; recoverLease() itself refuses to start a second loop, so the
+        // 10s status poll cannot stack recoveries.
+        if (qrStatus) {
+          qrStatus.textContent = "本会话当前未持有登录工作区：正在重新申请…";
+        }
+        recoverLease();
         return;
       }
       if (response.status === 401) {
@@ -791,7 +791,9 @@
   // Shared by the manual "刷新二维码" button and the automatic retry that kicks
   // in when GET /qr keeps reporting qr_not_ready: only this POST can make the
   // login page produce a QR code.
-  const requestQrRefresh = async ({ auto = false } = {}) => {
+  const autoRefreshesExhausted = () => qrAutoRefreshes >= 2;
+
+  const requestQrRefresh = async ({ auto = false, retries = 400 } = {}) => {
     qrPollStartedAt = Date.now();
     const refreshForm = new FormData();
     refreshForm.set("csrf_token", csrfToken);
@@ -822,12 +824,13 @@
           qrStatus.textContent = data.message || "检测到浏览器里还保留着登录状态，已重置，正在生成新的二维码...";
         }
       }
-      qrNotReadyAttempts = 0;
-      refreshLoginQr(1200);
+      if (!auto) qrNotReadyAttempts = 0;
+      // Hand the remaining budget through so the stop valve stays reachable.
+      refreshLoginQr(1200, Math.max(1, retries - 1));
       return;
     }
     qrNotReadyAttempts = 0;
-    refreshLoginQr(500);
+    refreshLoginQr(500, retries);
   };
 
   document.querySelectorAll("[data-refresh-login-qr]").forEach((button) => {
@@ -963,6 +966,13 @@
         closeFrame();
         window.setTimeout(() => window.location.reload(), 800);
       } catch (error) {
+        if (error.payload && error.payload.leaseLost) {
+          // The workspace moved on while the operator was finishing the scan;
+          // report the real condition instead of a generic save failure.
+          setStatus("保存时本会话已不再持有登录工作区：请重新申请工作区后再保存。", "warning");
+          recoverLease();
+          return;
+        }
         setStatus(`保存登录账号失败：${error.message}`, "danger");
       }
     });
@@ -1002,6 +1012,83 @@
       } catch (error) {
         setStatus(`复制失败：${error.message}`, "danger");
       }
+    });
+  });
+
+  // Defined after the pollers so the recovery path can safely call back into
+  // them (const bindings are not hoisted).
+  const trackWorkspace = (payload) => {
+    const next = payload || { state: "closed", active: false, position: 0, ticket: "" };
+    if (next.state === "active") {
+      acquiringWorkspace = false;
+      recoverAttempts = 0;
+    }
+    return next;
+  };
+  const acquireWorkspace = async () => {
+    const wasAcquiring = acquiringWorkspace;
+    acquiringWorkspace = true;
+    try {
+      const data = await postForm("/login-desktop/open", { mode: "add" });
+      workspace = trackWorkspace(data.workspace);
+      renderWorkspace(workspace);
+      if (data.state === "queued") return;
+      loadFrame(true);
+      refreshLoginQr(500);
+    } catch (error) {
+      if (error.payload && error.payload.leaseLost) {
+        recoverLease({ acquire: false });
+        return;
+      }
+      if (!wasAcquiring) {
+        setStatus(`申请登录工作区失败：${error.message}`, "danger");
+      }
+    }
+  };
+  const recoverLease = ({ acquire = true } = {}) => {
+    // The status poll calls back into this function when the workspace is not
+    // ours, so a server that keeps contradicting itself must not recurse here.
+    if (recoveringLease) return;
+    recoveringLease = true;
+    window.clearTimeout(qrRefreshTimer);
+    workspace = { state: "closed", active: false, position: 0, ticket: "" };
+    qrNotReadyAttempts = 0;
+    qrAutoRefreshes = 0;
+    lastPromotedTicket = "";
+    closeFrame();
+    setRecoverVisible(true);
+    if (qrStatus) {
+      qrStatus.textContent = "本会话当前未持有登录工作区：正在重新检查状态并尝试重新申请…";
+    }
+    setQrButtons("刷新二维码");
+    Promise.resolve(pollStatus())
+      .catch(() => {})
+      .then(() => {
+        // Re-acquiring is safe even when someone else holds the workspace: the
+        // server puts us in the queue. Back off so a workspace that can never be
+        // obtained cannot turn this into a request loop.
+        if (acquire) {
+          recoverAttempts += 1;
+          if (recoverAttempts <= 4) {
+            const backoff = [5000, 15000, 30000, 60000][recoverAttempts - 1];
+            window.setTimeout(() => {
+              recoveringLease = false;
+              acquireWorkspace();
+            }, backoff);
+            return;
+          }
+          if (qrStatus) {
+            qrStatus.textContent = "登录工作区仍未分配给本会话：请从账号页点“重新登录”，或稍后点“刷新二维码”重试。";
+          }
+          setQrButtons("已停止，点此重试", { stopped: true });
+        }
+        recoveringLease = false;
+      });
+  };
+  document.querySelectorAll("[data-recover-login-workspace]").forEach((button) => {
+    button.addEventListener("click", () => {
+      recoverAttempts = 0;
+      recoverLease();
     });
   });
 

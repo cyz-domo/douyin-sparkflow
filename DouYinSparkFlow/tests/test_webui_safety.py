@@ -459,24 +459,45 @@ class WebUiSafetyTests(unittest.TestCase):
 
         self.assertIn("data-recover-login-workspace", page)
         self.assertIn("recoverLease", script)
-        # The lease-loss branch must clear the stale local workspace view.
-        self.assertIn('workspace = { state: "closed", active: false, position: 0, ticket: "" }', script)
-        # Inside the QR poll, 423 must be classified before the "page is busy"
-        # fallback, otherwise the retry loop swallows it again.
+        # The lease-loss branch must clear the stale local workspace view. The
+        # whole reset is required, not just the literal that also exists in the
+        # initial declaration.
+        self.assertIn('workspace = { state: "closed", active: false, position: 0, ticket: "" };', script)
+        recover_start = script.index("const recoverLease")
+        reset_block = script[recover_start:script.index('querySelectorAll("[data-recover-login-workspace]")', recover_start)]
+        for reset in ("qrNotReadyAttempts = 0", "qrAutoRefreshes = 0", "lastPromotedTicket = \"\"", "closeFrame()", "setRecoverVisible(true)"):
+            self.assertIn(reset, reset_block)
+        # Inside the QR poll, 423 must be classified and recovered BEFORE the
+        # "page is busy" fallback, otherwise the retry loop swallows it again.
         start = script.index("const refreshLoginQr = async")
         end = script.index("const pollStatus = async")
         qr_poll = script[start:end]
         self.assertIn("response.status === 423", qr_poll)
         self.assertIn("recoverLease()", qr_poll)
-        self.assertLess(qr_poll.index("response.status === 423"), qr_poll.index('retryLater("登录页正在加载")'))
-        # A never-ready QR code must trigger a real refresh instead of polling forever.
+        self.assertLess(qr_poll.index("response.status === 423"), qr_poll.index("recoverLease()"))
+        self.assertLess(qr_poll.index("recoverLease()"), qr_poll.index('retryLater("登录页正在加载")'))
+        # The other lease-gated calls must recover instead of printing a bare error.
+        for handler in (".login-desktop-save", "data-focus-native-browser"):
+            self.assertIn(handler, script)
+        self.assertGreaterEqual(script.count("payload.leaseLost"), 4)
+        self.assertIn("if (error.payload && error.payload.leaseLost)", script)
+        # A never-ready QR code must trigger a real refresh, but a bounded number
+        # of times, and the remaining retry budget must survive the refresh.
         self.assertIn("qrNotReadyAttempts", script)
-        self.assertIn("requestQrRefresh({ auto: true })", script)
+        self.assertIn("qrAutoRefreshes", script)
+        self.assertIn("autoRefreshesExhausted()", script)
+        self.assertIn("qrAutoRefreshes >= 2", script)
+        self.assertIn("requestQrRefresh({ auto: true, retries: retries })", script)
+        self.assertIn("Math.max(1, retries - 1)", script)
+        # Recovery must not be able to start a second loop, and must acquire with
+        # a bounded backoff rather than hammering /login-desktop/open.
+        self.assertIn("if (recoveringLease) return;", script)
+        self.assertIn("acquireWorkspace", script)
+        self.assertIn("[5000, 15000, 30000, 60000]", script)
         # The lease problem must not be reported as a login-desktop outage, and
         # the native-only focus button must not be offered in noVNC mode.
         self.assertNotIn("请检查 login-desktop 服务", script)
         self.assertIn('if (displayMode !== "native")', script)
-        self.assertIn("payload.leaseLost", script)
 
     def test_schedule_sync_writes_configured_window_to_shared_spool(self):
         with tempfile.TemporaryDirectory() as temp_dir:
