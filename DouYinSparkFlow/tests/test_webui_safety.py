@@ -1,6 +1,7 @@
 import asyncio
 import errno
 import os
+import re
 import tempfile
 import time
 import unittest
@@ -488,33 +489,58 @@ class WebUiSafetyTests(unittest.TestCase):
         self.assertIn("qrNotReadyAttempts >= 4", script)
         self.assertIn('setQrButtons("已停止，点此重试", { stopped: true })', script)
         self.assertNotIn("qrAutoRefreshes", script)
-        auto_calls = [line for line in script.splitlines() if "requestQrRefresh({" in line]
+        auto_calls = [line for line in script.splitlines() if "requestQrRefresh(" in line and "await requestQrRefresh()" not in line]
         self.assertEqual([], auto_calls, f"automatic refresh must not be wired back in: {auto_calls}")
         # Recovery must not be able to start a second loop, and the number of
         # automatic re-acquisitions must be capped by a budget that only a user
         # action renews -- a grant must NOT renew it, or a flapping lease turns
         # the ladder into an endless cycle of POST /login-desktop/open.
         self.assertIn("if (recoveringLease) return;", script)
-        self.assertIn("acquireWorkspace", script)
         self.assertIn("const RECOVER_BUDGET = 2;", script)
         self.assertIn("recoverAttempts <= RECOVER_BUDGET", script)
-        self.assertIn("[5000, 15000, 30000, 60000]", script)
-        reset_sites = [line.strip() for line in script.splitlines() if line.strip().startswith("recoverAttempts = 0")]
+        # The ladder must only be as long as the budget can reach.
+        self.assertIn("[5000, 15000]", script)
+        self.assertNotIn("30000, 60000", script)
+        # Exactly one place may renew the budget, and it must not be the
+        # automatic path. Line-start matching is not enough: an inlined
+        # `if (active) recoverAttempts = 0;` would slip through, so match the
+        # assignment anywhere and require the single hit to sit inside
+        # resetRecoveryBudget.
+        reset_sites = [
+            match.group(0)
+            for match in re.finditer(r"^[^\n]*recoverAttempts\s*=\s*0", script, flags=re.MULTILINE)
+            if not re.search(r"\b(let|const|var)\b[^\n]*recoverAttempts\s*=\s*0", match.group(0))
+        ]
         self.assertEqual(1, len(reset_sites), f"only resetRecoveryBudget may renew the budget: {reset_sites}")
         budget_fn = script[script.index("const resetRecoveryBudget"):script.index("const recoverLease")]
-        self.assertIn("recoverAttempts = 0", budget_fn)
+        self.assertRegex(budget_fn, r"recoverAttempts\s*=\s*0")
         self.assertIn("window.clearTimeout(recoveryTimer)", budget_fn)
+        # The automatic path must never renew the budget or cancel the ladder.
+        recover_start = script.index("const recoverLease")
+        recover_fn = script[recover_start:script.index("document.querySelectorAll", recover_start)]
+        self.assertNotIn("resetRecoveryBudget", recover_fn)
+        self.assertRegex(recover_fn, r"recoverAttempts\s*\+=")
         # The pending re-acquisition must be cancellable and must not run after a
         # grant, otherwise it reloads the shared login page for nothing.
         self.assertIn("recoveryTimer", script)
-        self.assertIn("window.clearTimeout(recoveryTimer);", script)
         acquire_fn = script[script.index("const acquireWorkspace"):script.index("const resetRecoveryBudget")]
         self.assertIn("window.clearTimeout(recoveryTimer)", acquire_fn)
-        self.assertIn('workspace.state === "active" && workspace.active', script)
+        # The timer callback must re-check that no workspace is held. Assert it
+        # inside the timer body so deleting the guard cannot pass by matching the
+        # same string in renderWorkspace or pollStatus.
+        timer_body = recover_fn[recover_fn.index("window.setTimeout("):]
+        self.assertIn('workspace.state === "active" && workspace.active', timer_body)
+        self.assertIn("acquireWorkspace()", timer_body)
+        # A newly granted workspace gets a fresh QR poll budget on either path.
+        promote_block = script[script.index("if (promoted) {"):script.index("if (displayMode === \"native\") {")]
+        self.assertIn("qrNotReadyAttempts = 0", promote_block)
+        apply_fn = script[script.index("const applyWorkspace"):script.index("const acquireWorkspace")]
+        self.assertIn("qrNotReadyAttempts = 0", apply_fn)
         # Every deliberate user action renews the budget.
+        self.assertGreaterEqual(script.count("resetRecoveryBudget()"), 4)
         for handler in (".login-desktop-open", ".login-desktop-save", "[data-refresh-login-qr]", "[data-recover-login-workspace]"):
             self.assertIn(handler, script)
-        self.assertGreaterEqual(script.count("resetRecoveryBudget()"), 4)
+        self.assertNotIn("requestQrRefresh({", script)
         # The lease problem must not be reported as a login-desktop outage, and
         # the native-only focus button must not be offered in noVNC mode.
         self.assertNotIn("请检查 login-desktop 服务", script)

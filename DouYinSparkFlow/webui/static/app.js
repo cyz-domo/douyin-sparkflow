@@ -518,6 +518,9 @@
         // re-fetching the QR code on every poll burns the single login-desktop
         // page lock and makes the whole login flow feel sluggish.
         lastPromotedTicket = workspace.ticket;
+        // A new workspace starts with a fresh QR poll budget, whichever path
+        // granted it (user click or automatic recovery).
+        qrNotReadyAttempts = 0;
         if (section && !section.open) section.open = true;
         loadFrame(true);
         qrPollStartedAt = Date.now();
@@ -612,8 +615,8 @@
             if (qrStatus) qrStatus.textContent = data.message || "检测到浏览器里还保留着登录状态，已重置，正在生成新的二维码...";
           }
           // GET /qr only reads the page, and a healthy login page produces its
-          // code within a few seconds on its own. If none appears after twelve
-          // seconds of polling, stop guessing and hand the decision back: each
+          // code within a few seconds on its own. If none appears after a few
+          // polls, stop guessing and hand the decision back: each
           // POST /qr/refresh reloads the shared Douyin login page while the
           // operator may be scanning in the noVNC frame, because the page lock
           // is global.
@@ -625,7 +628,9 @@
             setQrButtons("已停止，点此重试", { stopped: true });
             return;
           }
-          retryLater(data.message || "浏览器正在生成二维码");
+          // Honour the server's own pacing hint when it gives one.
+          const retryHint = Number(response.headers.get("Retry-After") || data.retry_after || 0);
+          retryLater(data.message || "浏览器正在生成二维码", retryHint > 0 ? retryHint * 1000 : 3000);
           return;
         }
         if (response.status === 503) {
@@ -787,10 +792,9 @@
     });
   });
 
-  // Shared by the manual "刷新二维码" button and the automatic retry that kicks
-  // in when GET /qr keeps reporting qr_not_ready: only this POST can make the
-  // login page produce a QR code.
-  const requestQrRefresh = async ({ auto = false } = {}) => {
+  // Only the manual "刷新二维码" button calls this: the POST reloads the shared
+  // login page, so it must never be triggered automatically.
+  const requestQrRefresh = async () => {
     qrPollStartedAt = Date.now();
     const refreshForm = new FormData();
     refreshForm.set("csrf_token", csrfToken);
@@ -813,8 +817,7 @@
     if (!response.ok || data.ok === false) {
       // A 202 with ok:false means the page did not produce a QR code yet.
       if (qrStatus) {
-        const prefix = auto ? "自动刷新二维码未完成" : "刷新二维码未完成";
-        qrStatus.textContent = `${prefix}：${data.message || data.error || response.status}`;
+        qrStatus.textContent = `刷新二维码未完成：${data.message || data.error || response.status}`;
       }
       if (data.state === "logged_in" || data.logged_in) {
         if (qrStatus) {
@@ -1019,12 +1022,14 @@
     const next = payload || { state: "closed", active: false, position: 0, ticket: "" };
     if (next.state === "active") {
       acquiringWorkspace = false;
-      qrNotReadyAttempts = 0;
     }
     return next;
   };
   const applyWorkspace = (data, { openFrame = false, pollQr = false } = {}) => {
     workspace = trackWorkspace(data.workspace);
+    // Granting a workspace starts a fresh QR poll budget even though this path
+    // assigns `workspace` first (so renderWorkspace's promote branch is skipped).
+    if (workspace.state === "active" && workspace.active) qrNotReadyAttempts = 0;
     renderWorkspace(workspace);
     if (openFrame && data.state !== "queued") loadFrame(true);
     if (pollQr && data.state !== "queued" && workspace.active) refreshLoginQr(500);
@@ -1046,8 +1051,10 @@
       }
       if (!wasAcquiring) {
         setStatus(`申请登录工作区失败：${error.message}`, "danger");
-        if (qrStatus) qrStatus.textContent = `重新申请登录工作区失败：${error.message}`;
       }
+      // Always report the failure: an automatic attempt that fails must not
+      // leave the stale "正在重新检查状态并尝试重新申请…" line on screen.
+      if (qrStatus) qrStatus.textContent = `重新申请登录工作区失败：${error.message}`;
     }
   };
   // Any deliberate user action starts a fresh recovery budget; only this resets
@@ -1088,7 +1095,7 @@
         // of POST /login-desktop/open (each one reloads the shared login page).
         recoverAttempts += 1;
         if (recoverAttempts <= RECOVER_BUDGET) {
-          const backoff = [5000, 15000, 30000, 60000][Math.min(recoverAttempts - 1, 3)];
+          const backoff = [5000, 15000][Math.min(recoverAttempts - 1, 1)];
           recoveryTimer = window.setTimeout(() => {
             recoveryTimer = null;
             // A workspace granted in the meantime makes re-acquisition pointless.
