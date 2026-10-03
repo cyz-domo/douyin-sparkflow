@@ -512,7 +512,6 @@
         // re-fetching the QR code on every poll burns the single login-desktop
         // page lock and makes the whole login flow feel sluggish.
         lastPromotedTicket = workspace.ticket;
-        qrAutoRefreshes = 0;
         recoverAttempts = 0;
         if (section && !section.open) section.open = true;
         loadFrame(true);
@@ -548,7 +547,6 @@
   let qrPollStartedAt = 0;
   let lastPromotedTicket = "";
   let qrNotReadyAttempts = 0;
-  let qrAutoRefreshes = 0;
   let recoveringLease = false;
   let recoverAttempts = 0;
   let acquiringWorkspace = false;
@@ -608,23 +606,18 @@
           if (data.logged_in || data.state === "qr_logged_in") {
             if (qrStatus) qrStatus.textContent = data.message || "检测到浏览器里还保留着登录状态，已重置，正在生成新的二维码...";
           }
-          // GET /qr only reads the page; only /qr/refresh can make the QR code
-          // appear. When the page keeps reporting "not ready", ask for a refresh
-          // instead of polling forever -- but a bounded number of times, because
-          // every refresh reloads the shared Douyin login page and the operator
-          // may be scanning in the noVNC frame at that very moment.
+          // GET /qr only reads the page, and a healthy login page produces its
+          // code within a few seconds on its own. If none appears after twelve
+          // seconds of polling, stop guessing and hand the decision back: each
+          // POST /qr/refresh reloads the shared Douyin login page while the
+          // operator may be scanning in the noVNC frame, because the page lock
+          // is global.
           qrNotReadyAttempts += 1;
           if (qrNotReadyAttempts >= 4) {
-            qrNotReadyAttempts = 0;
-            if (autoRefreshesExhausted()) {
-              if (qrStatus) {
-                qrStatus.textContent = (data.message || "浏览器仍未生成二维码") + " 已停止自动刷新，请点击“刷新二维码”重试。";
-              }
-              setQrButtons("已停止，点此重试", { stopped: true });
-              return;
+            if (qrStatus) {
+              qrStatus.textContent = (data.message || "浏览器仍未生成二维码") + " 请点击“刷新二维码”重试，或稍后再试。";
             }
-            qrAutoRefreshes += 1;
-            Promise.resolve(requestQrRefresh({ auto: true, retries: retries })).catch(() => {});
+            setQrButtons("已停止，点此重试", { stopped: true });
             return;
           }
           retryLater(data.message || "浏览器正在生成二维码");
@@ -791,9 +784,7 @@
   // Shared by the manual "刷新二维码" button and the automatic retry that kicks
   // in when GET /qr keeps reporting qr_not_ready: only this POST can make the
   // login page produce a QR code.
-  const autoRefreshesExhausted = () => qrAutoRefreshes >= 2;
-
-  const requestQrRefresh = async ({ auto = false, retries = 400 } = {}) => {
+  const requestQrRefresh = async ({ auto = false } = {}) => {
     qrPollStartedAt = Date.now();
     const refreshForm = new FormData();
     refreshForm.set("csrf_token", csrfToken);
@@ -824,13 +815,12 @@
           qrStatus.textContent = data.message || "检测到浏览器里还保留着登录状态，已重置，正在生成新的二维码...";
         }
       }
-      if (!auto) qrNotReadyAttempts = 0;
-      // Hand the remaining budget through so the stop valve stays reachable.
-      refreshLoginQr(1200, Math.max(1, retries - 1));
+      qrNotReadyAttempts = 0;
+      refreshLoginQr(1200);
       return;
     }
     qrNotReadyAttempts = 0;
-    refreshLoginQr(500, retries);
+    refreshLoginQr(500);
   };
 
   document.querySelectorAll("[data-refresh-login-qr]").forEach((button) => {
@@ -1053,7 +1043,6 @@
     window.clearTimeout(qrRefreshTimer);
     workspace = { state: "closed", active: false, position: 0, ticket: "" };
     qrNotReadyAttempts = 0;
-    qrAutoRefreshes = 0;
     lastPromotedTicket = "";
     closeFrame();
     setRecoverVisible(true);

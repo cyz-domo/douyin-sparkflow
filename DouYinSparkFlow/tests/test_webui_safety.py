@@ -465,7 +465,7 @@ class WebUiSafetyTests(unittest.TestCase):
         self.assertIn('workspace = { state: "closed", active: false, position: 0, ticket: "" };', script)
         recover_start = script.index("const recoverLease")
         reset_block = script[recover_start:script.index('querySelectorAll("[data-recover-login-workspace]")', recover_start)]
-        for reset in ("qrNotReadyAttempts = 0", "qrAutoRefreshes = 0", "lastPromotedTicket = \"\"", "closeFrame()", "setRecoverVisible(true)"):
+        for reset in ("qrNotReadyAttempts = 0", 'lastPromotedTicket = ""', "closeFrame()", "setRecoverVisible(true)"):
             self.assertIn(reset, reset_block)
         # Inside the QR poll, 423 must be classified and recovered BEFORE the
         # "page is busy" fallback, otherwise the retry loop swallows it again.
@@ -481,14 +481,15 @@ class WebUiSafetyTests(unittest.TestCase):
             self.assertIn(handler, script)
         self.assertGreaterEqual(script.count("payload.leaseLost"), 4)
         self.assertIn("if (error.payload && error.payload.leaseLost)", script)
-        # A never-ready QR code must trigger a real refresh, but a bounded number
-        # of times, and the remaining retry budget must survive the refresh.
+        # A never-ready QR code must stop polling and hand control back to the
+        # operator; it must not keep POSTing /qr/refresh, because every refresh
+        # reloads the shared Douyin login page under the operator's cursor.
         self.assertIn("qrNotReadyAttempts", script)
-        self.assertIn("qrAutoRefreshes", script)
-        self.assertIn("autoRefreshesExhausted()", script)
-        self.assertIn("qrAutoRefreshes >= 2", script)
-        self.assertIn("requestQrRefresh({ auto: true, retries: retries })", script)
-        self.assertIn("Math.max(1, retries - 1)", script)
+        self.assertIn("qrNotReadyAttempts >= 4", script)
+        self.assertIn('setQrButtons("已停止，点此重试", { stopped: true })', script)
+        self.assertNotIn("qrAutoRefreshes", script)
+        auto_calls = [line for line in script.splitlines() if "requestQrRefresh({" in line]
+        self.assertEqual([], auto_calls, f"automatic refresh must not be wired back in: {auto_calls}")
         # Recovery must not be able to start a second loop, and must acquire with
         # a bounded backoff rather than hammering /login-desktop/open.
         self.assertIn("if (recoveringLease) return;", script)
