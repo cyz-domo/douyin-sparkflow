@@ -766,6 +766,10 @@
         renderWorkspace(data.workspace);
         if (data.state === "queued") return;
         loadFrame(true);
+        // Start a fresh poll budget: re-opening an already-held workspace keeps the
+        // same ticket, so the promote branch above does not fire and a stale
+        // counter would stop the new poll after a single 202.
+        qrNotReadyAttempts = 0;
         refreshLoginQr(500);
         if (frame) frame.scrollIntoView({ behavior: "smooth", block: "start" });
       } catch (error) {

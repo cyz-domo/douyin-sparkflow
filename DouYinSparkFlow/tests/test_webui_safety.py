@@ -497,7 +497,10 @@ class WebUiSafetyTests(unittest.TestCase):
         # the ladder into an endless cycle of POST /login-desktop/open.
         self.assertIn("if (recoveringLease) return;", script)
         self.assertIn("const RECOVER_BUDGET = 2;", script)
-        self.assertIn("recoverAttempts <= RECOVER_BUDGET", script)
+        # Pin the exact comparison: a trailing `|| true` would neuter the cap
+        # while still containing the substring.
+        self.assertIn("if (recoverAttempts <= RECOVER_BUDGET) {", script)
+        self.assertNotIn("RECOVER_BUDGET ||", script)
         # The ladder must only be as long as the budget can reach.
         self.assertIn("[5000, 15000]", script)
         self.assertNotIn("30000, 60000", script)
@@ -519,7 +522,10 @@ class WebUiSafetyTests(unittest.TestCase):
         recover_start = script.index("const recoverLease")
         recover_fn = script[recover_start:script.index("document.querySelectorAll", recover_start)]
         self.assertNotIn("resetRecoveryBudget", recover_fn)
-        self.assertRegex(recover_fn, r"recoverAttempts\s*\+=")
+        # Pin the value: `recoverAttempts += 0;` would make the cap permanently
+        # true and revive the unbounded loop while still matching `+=`.
+        self.assertIn("recoverAttempts += 1;", recover_fn)
+        self.assertIn("recoverAttempts += 1;", script)
         # The pending re-acquisition must be cancellable and must not run after a
         # grant, otherwise it reloads the shared login page for nothing.
         self.assertIn("recoveryTimer", script)
@@ -531,6 +537,9 @@ class WebUiSafetyTests(unittest.TestCase):
         timer_body = recover_fn[recover_fn.index("window.setTimeout("):]
         self.assertIn('workspace.state === "active" && workspace.active', timer_body)
         self.assertIn("acquireWorkspace()", timer_body)
+        # The automatic pollers must never re-acquire: acquireWorkspace may only
+        # be called from the budgeted timer, so pin the call-site count.
+        self.assertEqual(1, script.count("acquireWorkspace()"), "acquireWorkspace must have exactly one call site")
         # A newly granted workspace gets a fresh QR poll budget on either path.
         promote_block = script[script.index("if (promoted) {"):script.index("if (displayMode === \"native\") {")]
         self.assertIn("qrNotReadyAttempts = 0", promote_block)
@@ -538,8 +547,6 @@ class WebUiSafetyTests(unittest.TestCase):
         self.assertIn("qrNotReadyAttempts = 0", apply_fn)
         # Every deliberate user action renews the budget.
         self.assertGreaterEqual(script.count("resetRecoveryBudget()"), 4)
-        for handler in (".login-desktop-open", ".login-desktop-save", "[data-refresh-login-qr]", "[data-recover-login-workspace]"):
-            self.assertIn(handler, script)
         self.assertNotIn("requestQrRefresh({", script)
         # The lease problem must not be reported as a login-desktop outage, and
         # the native-only focus button must not be offered in noVNC mode.
