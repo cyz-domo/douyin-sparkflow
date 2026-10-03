@@ -490,11 +490,31 @@ class WebUiSafetyTests(unittest.TestCase):
         self.assertNotIn("qrAutoRefreshes", script)
         auto_calls = [line for line in script.splitlines() if "requestQrRefresh({" in line]
         self.assertEqual([], auto_calls, f"automatic refresh must not be wired back in: {auto_calls}")
-        # Recovery must not be able to start a second loop, and must acquire with
-        # a bounded backoff rather than hammering /login-desktop/open.
+        # Recovery must not be able to start a second loop, and the number of
+        # automatic re-acquisitions must be capped by a budget that only a user
+        # action renews -- a grant must NOT renew it, or a flapping lease turns
+        # the ladder into an endless cycle of POST /login-desktop/open.
         self.assertIn("if (recoveringLease) return;", script)
         self.assertIn("acquireWorkspace", script)
+        self.assertIn("const RECOVER_BUDGET = 2;", script)
+        self.assertIn("recoverAttempts <= RECOVER_BUDGET", script)
         self.assertIn("[5000, 15000, 30000, 60000]", script)
+        reset_sites = [line.strip() for line in script.splitlines() if line.strip().startswith("recoverAttempts = 0")]
+        self.assertEqual(1, len(reset_sites), f"only resetRecoveryBudget may renew the budget: {reset_sites}")
+        budget_fn = script[script.index("const resetRecoveryBudget"):script.index("const recoverLease")]
+        self.assertIn("recoverAttempts = 0", budget_fn)
+        self.assertIn("window.clearTimeout(recoveryTimer)", budget_fn)
+        # The pending re-acquisition must be cancellable and must not run after a
+        # grant, otherwise it reloads the shared login page for nothing.
+        self.assertIn("recoveryTimer", script)
+        self.assertIn("window.clearTimeout(recoveryTimer);", script)
+        acquire_fn = script[script.index("const acquireWorkspace"):script.index("const resetRecoveryBudget")]
+        self.assertIn("window.clearTimeout(recoveryTimer)", acquire_fn)
+        self.assertIn('workspace.state === "active" && workspace.active', script)
+        # Every deliberate user action renews the budget.
+        for handler in (".login-desktop-open", ".login-desktop-save", "[data-refresh-login-qr]", "[data-recover-login-workspace]"):
+            self.assertIn(handler, script)
+        self.assertGreaterEqual(script.count("resetRecoveryBudget()"), 4)
         # The lease problem must not be reported as a login-desktop outage, and
         # the native-only focus button must not be offered in noVNC mode.
         self.assertNotIn("请检查 login-desktop 服务", script)

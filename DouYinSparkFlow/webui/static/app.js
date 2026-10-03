@@ -422,6 +422,12 @@
   let heartbeatTimer = null;
   let countdownTimer = null;
   let qrRefreshTimer = null;
+  let recoveryTimer = null;
+  // How many automatic re-acquisitions one user action may cause. The budget is
+  // set by a user action and is never renewed by the automatic path itself, so a
+  // flapping lease cannot drive an endless cycle of POST /login-desktop/open
+  // (each one performs a page operation on the shared Douyin login page).
+  const RECOVER_BUDGET = 2;
   let workspace = { state: "closed", active: false, position: 0, ticket: "" };
   if (displayMode === "native" && copyLoginUrlButton) copyLoginUrlButton.hidden = true;
   if (displayMode === "native" && frameWrap) frameWrap.hidden = true;
@@ -512,7 +518,6 @@
         // re-fetching the QR code on every poll burns the single login-desktop
         // page lock and makes the whole login flow feel sluggish.
         lastPromotedTicket = workspace.ticket;
-        recoverAttempts = 0;
         if (section && !section.open) section.open = true;
         loadFrame(true);
         qrPollStartedAt = Date.now();
@@ -746,6 +751,7 @@
     button.addEventListener("click", async () => {
       if (section) section.open = true;
       try {
+        resetRecoveryBudget();
         const reloginUniqueId = button.dataset.reloginUniqueId || "";
         const mode = button.dataset.loginMode || (reloginUniqueId ? "relogin" : "add");
         const data = await postForm("/login-desktop/open", {
@@ -827,6 +833,7 @@
     button.addEventListener("click", async () => {
       button.disabled = true;
       try {
+        resetRecoveryBudget();
         await requestQrRefresh();
       } catch (error) {
         if (qrStatus) qrStatus.textContent = `刷新二维码失败：${error.message}`;
@@ -894,6 +901,7 @@
           ...extra,
         });
       try {
+        resetRecoveryBudget();
         let data;
         try {
           data = await saveLogin();
@@ -1011,20 +1019,26 @@
     const next = payload || { state: "closed", active: false, position: 0, ticket: "" };
     if (next.state === "active") {
       acquiringWorkspace = false;
-      recoverAttempts = 0;
+      qrNotReadyAttempts = 0;
     }
     return next;
+  };
+  const applyWorkspace = (data, { openFrame = false, pollQr = false } = {}) => {
+    workspace = trackWorkspace(data.workspace);
+    renderWorkspace(workspace);
+    if (openFrame && data.state !== "queued") loadFrame(true);
+    if (pollQr && data.state !== "queued" && workspace.active) refreshLoginQr(500);
   };
   const acquireWorkspace = async () => {
     const wasAcquiring = acquiringWorkspace;
     acquiringWorkspace = true;
     try {
       const data = await postForm("/login-desktop/open", { mode: "add" });
-      workspace = trackWorkspace(data.workspace);
-      renderWorkspace(workspace);
-      if (data.state === "queued") return;
-      loadFrame(true);
-      refreshLoginQr(500);
+      // A fresh grant cancels any pending re-acquisition: without this the timer
+      // armed during recovery still fires and reloads the shared login page.
+      window.clearTimeout(recoveryTimer);
+      recoveryTimer = null;
+      applyWorkspace(data, { openFrame: true, pollQr: true });
     } catch (error) {
       if (error.payload && error.payload.leaseLost) {
         recoverLease({ acquire: false });
@@ -1032,8 +1046,17 @@
       }
       if (!wasAcquiring) {
         setStatus(`申请登录工作区失败：${error.message}`, "danger");
+        if (qrStatus) qrStatus.textContent = `重新申请登录工作区失败：${error.message}`;
       }
     }
+  };
+  // Any deliberate user action starts a fresh recovery budget; only this resets
+  // it, so an automatic loop can never renew its own budget.
+  const resetRecoveryBudget = () => {
+    window.clearTimeout(recoveryTimer);
+    recoveryTimer = null;
+    recoverAttempts = 0;
+    recoveringLease = false;
   };
   const recoverLease = ({ acquire = true } = {}) => {
     // The status poll calls back into this function when the workspace is not
@@ -1041,6 +1064,8 @@
     if (recoveringLease) return;
     recoveringLease = true;
     window.clearTimeout(qrRefreshTimer);
+    window.clearTimeout(recoveryTimer);
+    recoveryTimer = null;
     workspace = { state: "closed", active: false, position: 0, ticket: "" };
     qrNotReadyAttempts = 0;
     lastPromotedTicket = "";
@@ -1053,30 +1078,40 @@
     Promise.resolve(pollStatus())
       .catch(() => {})
       .then(() => {
-        // Re-acquiring is safe even when someone else holds the workspace: the
-        // server puts us in the queue. Back off so a workspace that can never be
-        // obtained cannot turn this into a request loop.
-        if (acquire) {
-          recoverAttempts += 1;
-          if (recoverAttempts <= 4) {
-            const backoff = [5000, 15000, 30000, 60000][recoverAttempts - 1];
-            window.setTimeout(() => {
-              recoveringLease = false;
-              acquireWorkspace();
-            }, backoff);
-            return;
-          }
-          if (qrStatus) {
-            qrStatus.textContent = "登录工作区仍未分配给本会话：请从账号页点“重新登录”，或稍后点“刷新二维码”重试。";
-          }
-          setQrButtons("已停止，点此重试", { stopped: true });
+        if (!acquire) {
+          recoveringLease = false;
+          return;
         }
+        // Re-acquiring is safe even when someone else holds the workspace: the
+        // server puts us in the queue. The budget is set by a user action and is
+        // never renewed here, so a flapping lease cannot drive an endless cycle
+        // of POST /login-desktop/open (each one reloads the shared login page).
+        recoverAttempts += 1;
+        if (recoverAttempts <= RECOVER_BUDGET) {
+          const backoff = [5000, 15000, 30000, 60000][Math.min(recoverAttempts - 1, 3)];
+          recoveryTimer = window.setTimeout(() => {
+            recoveryTimer = null;
+            // A workspace granted in the meantime makes re-acquisition pointless.
+            if (workspace.state === "active" && workspace.active) {
+              recoveringLease = false;
+              return;
+            }
+            recoveringLease = false;
+            acquireWorkspace();
+          }, backoff);
+          return;
+        }
+        if (qrStatus) {
+          qrStatus.textContent = "登录工作区仍未分配给本会话：请从账号页点“重新登录”，或点“重新检查工作区”再试一次。";
+        }
+        setRecoverVisible(true);
+        setQrButtons("已停止，点此重试", { stopped: true });
         recoveringLease = false;
       });
   };
   document.querySelectorAll("[data-recover-login-workspace]").forEach((button) => {
     button.addEventListener("click", () => {
-      recoverAttempts = 0;
+      resetRecoveryBudget();
       recoverLease();
     });
   });
