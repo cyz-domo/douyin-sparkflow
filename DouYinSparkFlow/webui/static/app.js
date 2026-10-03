@@ -425,6 +425,14 @@
   let workspace = { state: "closed", active: false, position: 0, ticket: "" };
   if (displayMode === "native" && copyLoginUrlButton) copyLoginUrlButton.hidden = true;
   if (displayMode === "native" && frameWrap) frameWrap.hidden = true;
+  // "显示本机登录浏览器" only makes sense for the Windows native mode; in the
+  // noVNC mode the browser is already shown in the frame, so leaving the button
+  // visible only invited clicks that come back as a 423 lease error.
+  if (displayMode !== "native") {
+    document.querySelectorAll("[data-focus-native-browser]").forEach((button) => {
+      button.hidden = true;
+    });
+  }
 
   const setStatus = (text, tone = "") => {
     if (statusText) statusText.textContent = text;
@@ -445,6 +453,11 @@
       // Keep the server's grading (category / categoryLabel / retryable) so
       // callers can render an actionable message instead of a bare string.
       error.payload = data;
+      error.status = response.status;
+      // 423 is the lease gate: this session no longer holds the login
+      // workspace, which callers must recover from instead of reporting the
+      // login-desktop service as broken.
+      error.payload.leaseLost = response.status === 423;
       throw error;
     }
     return data;
@@ -533,6 +546,7 @@
 
   let qrPollStartedAt = 0;
   let lastPromotedTicket = "";
+  let qrNotReadyAttempts = 0;
   const setQrButtons = (label, { busy = false, stopped = false } = {}) => {
     document.querySelectorAll("[data-refresh-login-qr]").forEach((button) => {
       const text = button.querySelector("span");
@@ -545,6 +559,34 @@
     if (!qrPollStartedAt) return "";
     return `（已等待 ${Math.round((Date.now() - qrPollStartedAt) / 1000)} 秒）`;
   };
+
+  // 423 means this session does not hold the login workspace lease. That is a
+  // workspace-state problem, not a slow page: retrying blindly made the QR code
+  // spin forever and the noVNC frame never load. Drop the stale local view and
+  // re-read the real workspace state so the page can show it and offer actions.
+  const setRecoverVisible = (visible) => {
+    document.querySelectorAll("[data-recover-login-workspace]").forEach((button) => {
+      button.hidden = !visible;
+    });
+  };
+  const recoverLease = () => {
+    window.clearTimeout(qrRefreshTimer);
+    workspace = { state: "closed", active: false, position: 0, ticket: "" };
+    qrNotReadyAttempts = 0;
+    lastPromotedTicket = "";
+    closeFrame();
+    setRecoverVisible(true);
+    if (qrStatus) {
+      qrStatus.textContent = "本会话当前未持有登录工作区：请点上方的“打开登录工作区”重新申请，或在账号页选择“重新登录”。";
+    }
+    setQrButtons("刷新二维码");
+    pollStatus();
+  };
+  document.querySelectorAll("[data-recover-login-workspace]").forEach((button) => {
+    button.addEventListener("click", () => {
+      recoverLease();
+    });
+  });
 
   const refreshLoginQr = async (delay = 0, retries = 400) => {
     if (!qrImage || workspace.state !== "active" || !workspace.active) return;
@@ -562,6 +604,10 @@
       };
       try {
         const response = await fetch(`/login-desktop/qr?t=${Date.now()}`, { credentials: "same-origin", cache: "no-store" });
+        if (response.status === 423) {
+          recoverLease();
+          return;
+        }
         if (response.status === 409) {
           // Only an explicit refresh regenerates an expired QR code, so stop
           // polling and put the button into a visible retry state.
@@ -574,6 +620,15 @@
           const data = await response.json().catch(() => ({}));
           if (data.logged_in || data.state === "qr_logged_in") {
             if (qrStatus) qrStatus.textContent = data.message || "检测到浏览器里还保留着登录状态，已重置，正在生成新的二维码...";
+          }
+          // GET /qr only reads the page; only /qr/refresh can make the QR code
+          // appear. When the page keeps reporting "not ready", ask for a refresh
+          // instead of polling forever and letting the user wait without a code.
+          qrNotReadyAttempts += 1;
+          if (qrNotReadyAttempts >= 4) {
+            qrNotReadyAttempts = 0;
+            requestQrRefresh({ auto: true });
+            return;
           }
           retryLater(data.message || "浏览器正在生成二维码");
           return;
@@ -604,6 +659,11 @@
           }
           return;
         }
+        if (response.status === 401) {
+          if (qrStatus) qrStatus.textContent = "登录状态已失效，请重新登录控制台。";
+          setQrButtons("已停止，点此重试", { stopped: true });
+          return;
+        }
         if (!response.ok) throw new Error(String(response.status));
         const blob = await response.blob();
         if (blob.type && blob.type.includes("json")) {
@@ -619,6 +679,7 @@
         qrImage.dataset.objectUrl = objectUrl;
         qrImage.hidden = false;
         if (previous) URL.revokeObjectURL(previous);
+        qrNotReadyAttempts = 0;
         if (qrStatus) qrStatus.textContent = `二维码已加载。如果过期，点击刷新。${qrWaitLabel()}`;
         setQrButtons("刷新二维码");
       } catch {
@@ -632,10 +693,28 @@
     try {
       const statusUrl = workspace.state === "active" ? "/login-desktop/status" : "/login-desktop/workspace-status";
       const response = await fetch(statusUrl, { credentials: "same-origin", cache: "no-store" });
+      if (response.status === 423) {
+        // The lease is not held by this session any more. Showing "check the
+        // login-desktop service" here pointed operators at a container that was
+        // perfectly healthy, so name the real condition and offer the fix.
+        workspace = { state: "closed", active: false, position: 0, ticket: "" };
+        setRecoverVisible(true);
+        closeFrame();
+        setStatus("本会话当前未持有登录工作区，请点上方的“打开登录工作区”重新申请。", "warning");
+        return;
+      }
+      if (response.status === 401) {
+        setRecoverVisible(false);
+        setStatus("登录状态已失效，请重新登录控制台。", "danger");
+        return;
+      }
       const data = await response.json();
       if (!response.ok || data.ok === false) {
-        setStatus(data.error || "登录工作区不可用，请检查 login-desktop 服务。", "danger");
+        setStatus(data.error || "登录工作区暂时不可用，请稍后重试。", "danger");
         return;
+      }
+      if (data.workspace && data.workspace.state === "active" && data.workspace.active) {
+        setRecoverVisible(false);
       }
       renderWorkspace(data.workspace);
       if (workspace.state === "active" && workspace.active) {
@@ -660,6 +739,10 @@
       const data = await postForm("/login-desktop/heartbeat", { ticket: workspace.ticket });
       renderWorkspace(data.workspace);
     } catch (error) {
+      if (error.payload && error.payload.leaseLost) {
+        recoverLease();
+        return;
+      }
       workspace = { state: "closed", active: false, position: 0, ticket: "" };
       closeFrame();
       setStatus(`登录工作区已释放：${error.message}`, "danger");
@@ -694,6 +777,10 @@
         await postForm("/login-desktop/focus", { ticket: workspace.ticket });
         setStatus("已请求显示本机登录浏览器，请在桌面窗口中继续操作。", "success");
       } catch (error) {
+        if (error.payload && error.payload.leaseLost) {
+          recoverLease();
+          return;
+        }
         setStatus(`显示登录浏览器失败：${error.message}`, "danger");
       } finally {
         button.disabled = false;
@@ -701,34 +788,53 @@
     });
   });
 
+  // Shared by the manual "刷新二维码" button and the automatic retry that kicks
+  // in when GET /qr keeps reporting qr_not_ready: only this POST can make the
+  // login page produce a QR code.
+  const requestQrRefresh = async ({ auto = false } = {}) => {
+    qrPollStartedAt = Date.now();
+    const refreshForm = new FormData();
+    refreshForm.set("csrf_token", csrfToken);
+    refreshForm.set("ticket", workspace.ticket);
+    const response = await fetch("/login-desktop/qr/refresh", {
+      method: "POST",
+      body: refreshForm,
+      credentials: "same-origin",
+    });
+    const data = await response.json().catch(() => ({}));
+    if (response.status === 401) {
+      if (qrStatus) qrStatus.textContent = "登录状态已失效，请重新登录控制台。";
+      setQrButtons("已停止，点此重试", { stopped: true });
+      return;
+    }
+    if (response.status === 423) {
+      recoverLease();
+      return;
+    }
+    if (!response.ok || data.ok === false) {
+      // A 202 with ok:false means the page did not produce a QR code yet.
+      if (qrStatus) {
+        const prefix = auto ? "自动刷新二维码未完成" : "刷新二维码未完成";
+        qrStatus.textContent = `${prefix}：${data.message || data.error || response.status}`;
+      }
+      if (data.state === "logged_in" || data.logged_in) {
+        if (qrStatus) {
+          qrStatus.textContent = data.message || "检测到浏览器里还保留着登录状态，已重置，正在生成新的二维码...";
+        }
+      }
+      qrNotReadyAttempts = 0;
+      refreshLoginQr(1200);
+      return;
+    }
+    qrNotReadyAttempts = 0;
+    refreshLoginQr(500);
+  };
+
   document.querySelectorAll("[data-refresh-login-qr]").forEach((button) => {
     button.addEventListener("click", async () => {
       button.disabled = true;
-      qrPollStartedAt = Date.now();
       try {
-        const refreshForm = new FormData();
-        refreshForm.set("csrf_token", csrfToken);
-        refreshForm.set("ticket", workspace.ticket);
-        const response = await fetch("/login-desktop/qr/refresh", {
-          method: "POST",
-          body: refreshForm,
-          credentials: "same-origin",
-        });
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok || data.ok === false) {
-          // A 202 with ok:false means the page did not produce a QR code yet.
-          if (qrStatus) {
-            qrStatus.textContent = `刷新二维码未完成：${data.message || data.error || response.status}`;
-          }
-          if (data.state === "logged_in" || data.logged_in) {
-            if (qrStatus) {
-              qrStatus.textContent = data.message || "检测到浏览器里还保留着登录状态，已重置，正在生成新的二维码...";
-            }
-          }
-          refreshLoginQr(1200);
-          return;
-        }
-        refreshLoginQr(500);
+        await requestQrRefresh();
       } catch (error) {
         if (qrStatus) qrStatus.textContent = `刷新二维码失败：${error.message}`;
       } finally {

@@ -77,17 +77,45 @@ ssh -L 8788:127.0.0.1:8788 <user>@<server-ip>
 
 ## 常见问题
 
-### 登录工作区打不开
+### 登录工作区打不开 / 二维码一直不出现
 
-先确认 SSH 隧道仍在运行，再检查 `login-desktop` 容器。默认不需要把 8788 暴露到公网。登录浏览器、好友刷新和发送浏览器默认使用直连。Mihomo 是高级选项，可在 Web UI「系统设置」中手动启用。
+先分清是"登录桌面容器坏了"还是"这个会话没拿到工作区"，两者的表现和处理方式不同。
+
+1）页面提示"本会话当前未持有登录工作区"，或二维码一直停在"正在读取登录二维码…（已等待 N 秒）"：
+
+这是工作区（租约）没有分配给当前会话，不是容器故障。点页面上的"打开登录工作区"重新申请；提示排队时等前面的人释放即可。工作区同一时间只允许一个会话使用，离开或关闭页面会自动释放。
+
+想直接确认租约归谁，在服务器上执行：
+
+```bash
+cat /opt/douyin-sparkflow/state/login-workspace.lock.json
+```
+
+`active.username` / `active.session_id` 是当前持有者；文件不存在说明当前没有人持有。
+
+2）页面提示"登录桌面服务暂时不可用"或"无法访问抖音（网络或代理异常）"：
+
+不要只看 `/health`（它不检查浏览器，也不校验令牌），按下面三条查真实状态：
 
 ```bash
 docker compose ps
-docker compose logs -f login-desktop
-docker compose exec login-desktop curl -fsS http://127.0.0.1:18090/health
+docker compose logs --tail 80 login-desktop
+
+# 令牌 + 状态（/health 之外的所有接口都需要这个 Bearer 令牌）
+docker compose exec login-desktop sh -lc 'T=$(cat /run/login-api/token); \
+  curl -s -H "Authorization: Bearer $T" http://127.0.0.1:18090/status; echo; \
+  curl -s -H "Authorization: Bearer $T" http://127.0.0.1:18090/preflight; echo; \
+  curl -s -o /dev/null -w "qr=%{http_code}\n" -H "Authorization: Bearer $T" http://127.0.0.1:18090/qr'
+
+# 容器内的显示栈与端口
+docker compose exec login-desktop sh -lc 'ls -l /tmp/.X11-unix/; ss -ltn | grep -E "6080|5901|18090"'
 ```
 
-如果直连遇到网络问题，再在「系统设置」中选择 Mihomo 并填写代理地址。未配置 Mihomo 不会影响默认直连模式。
+- `/status` 里 `running:false` 且 `/qr` 一直是 202：登录浏览器没起来，看日志里有没有 `Missing X server` 或 `Target closed`。
+- `/preflight` 不是 200：服务器到抖音的网络不通，检查直连或代理设置。
+- `/qr` 返回 200 但页面不出码：问题在前端或租约，不在容器。
+
+3）确认是网络问题后，再在「系统设置」中选择 Mihomo 并填写代理地址。登录浏览器、好友刷新和发送浏览器默认使用直连，未配置 Mihomo 不影响直连。
 
 ### 账号保存后没有好友列表
 

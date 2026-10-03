@@ -447,6 +447,37 @@ class WebUiSafetyTests(unittest.TestCase):
         self.assertIn("retries - 1", script)
         self.assertIn('/login-desktop/qr/refresh', script)
 
+    def test_login_workspace_recovers_when_the_lease_is_gone(self):
+        """A 423 means "this session does not hold the lease", not "the page is slow".
+
+        The old frontend retried 423 as if the login page were still loading, so
+        the QR code spun forever and the noVNC frame never loaded, while the copy
+        blamed the healthy login-desktop container.
+        """
+        script = (Path(app_module.STATIC_DIR) / "app.js").read_text(encoding="utf-8")
+        page = (Path(app_module.TEMPLATES_DIR) / "login_workspace.html").read_text(encoding="utf-8")
+
+        self.assertIn("data-recover-login-workspace", page)
+        self.assertIn("recoverLease", script)
+        # The lease-loss branch must clear the stale local workspace view.
+        self.assertIn('workspace = { state: "closed", active: false, position: 0, ticket: "" }', script)
+        # Inside the QR poll, 423 must be classified before the "page is busy"
+        # fallback, otherwise the retry loop swallows it again.
+        start = script.index("const refreshLoginQr = async")
+        end = script.index("const pollStatus = async")
+        qr_poll = script[start:end]
+        self.assertIn("response.status === 423", qr_poll)
+        self.assertIn("recoverLease()", qr_poll)
+        self.assertLess(qr_poll.index("response.status === 423"), qr_poll.index('retryLater("登录页正在加载")'))
+        # A never-ready QR code must trigger a real refresh instead of polling forever.
+        self.assertIn("qrNotReadyAttempts", script)
+        self.assertIn("requestQrRefresh({ auto: true })", script)
+        # The lease problem must not be reported as a login-desktop outage, and
+        # the native-only focus button must not be offered in noVNC mode.
+        self.assertNotIn("请检查 login-desktop 服务", script)
+        self.assertIn('if (displayMode !== "native")', script)
+        self.assertIn("payload.leaseLost", script)
+
     def test_schedule_sync_writes_configured_window_to_shared_spool(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             cron_path = Path(temp_dir) / "root"
