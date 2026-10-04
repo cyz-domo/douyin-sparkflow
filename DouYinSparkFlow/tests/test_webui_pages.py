@@ -247,10 +247,21 @@ class RedesignedPagesTests(unittest.TestCase):
     def test_focus_scrolls_strip_items_and_textareas_fully_into_view(self):
         script = (Path(app_module.STATIC_DIR) / "app.js").read_text(encoding="utf-8")
         handler = script[script.index('document.addEventListener("focusin"'):]
-        handler = handler[: handler.index("\n});")]
+        handler = handler[: handler.index("\n  });")]
         self.assertIn('.settings-nav, .segmented-control', handler)
         self.assertIn('matches("textarea")', handler)
         self.assertIn('scrollIntoView({ block: "nearest", inline: "nearest" })', handler)
+        # Only keyboard focus scrolls; clicks, taps and window refocus leave the page alone.
+        self.assertIn("if (!focusFromTab", handler)
+        self.assertIn('focusFromTab = event.key === "Tab"', script)
+        self.assertIn('addEventListener("pointerdown", () => { focusFromTab = false; }', script)
+
+    def test_global_scroll_padding_comes_before_the_phone_override(self):
+        css = (Path(app_module.STATIC_DIR) / "app.css").read_text(encoding="utf-8")
+        self.assertLess(css.index("html { scroll-padding: 8px; }"), css.index("@media (max-width: 900px)"))
+        self.assertIn(".segmented-control, .settings-nav { scroll-padding-inline: 8px; }", css)
+        # 8px padding + 16px margin keeps desktop anchors 24px from the top.
+        self.assertIn(".settings-section { scroll-margin-top: 16px; }", css)
 
 
 if __name__ == "__main__":

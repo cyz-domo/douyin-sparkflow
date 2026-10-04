@@ -1421,13 +1421,20 @@ window.addEventListener("DOMContentLoaded", () => {
 });
 
 // Chromium does not scroll a half-hidden item of a sideways-scrolling strip into view on Tab,
-// and for a textarea it only reveals the caret line.
-document.addEventListener("focusin", (event) => {
-  const item = event.target;
-  if (!(item instanceof Element)) return;
-  if (!item.matches("textarea") && !item.closest(".settings-nav, .segmented-control")) return;
-  item.scrollIntoView({ block: "nearest", inline: "nearest" });
-});
+// and for a textarea it only reveals the caret line. Only for Tab: a click, a tap that opens the
+// soft keyboard, or focus coming back to the window must not move the page.
+(() => {
+  let focusFromTab = false;
+  document.addEventListener("keydown", (event) => { focusFromTab = event.key === "Tab"; }, true);
+  document.addEventListener("pointerdown", () => { focusFromTab = false; }, true);
+  window.addEventListener("blur", () => { focusFromTab = false; });
+  document.addEventListener("focusin", (event) => {
+    const item = event.target;
+    if (!focusFromTab || !(item instanceof Element)) return;
+    if (!item.matches("textarea") && !item.closest(".settings-nav, .segmented-control")) return;
+    item.scrollIntoView({ block: "nearest", inline: "nearest" });
+  });
+})();
 
 (() => {
   const form = document.querySelector("[data-schedule-preview-url]");
