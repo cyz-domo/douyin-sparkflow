@@ -240,13 +240,14 @@ class RedesignedPagesTests(unittest.TestCase):
         self.assertIn("html { scroll-padding-top: 68px; scroll-padding-bottom: calc(92px + env(safe-area-inset-bottom)); }", mobile)
         # The section's own margin adds to the padding; together they keep the old 80px landing.
         self.assertIn(".settings-section { scroll-margin-top: 12px; }", mobile)
-        self.assertIn(".segment-button { min-height: 40px; }", mobile)
+        narrow = css[css.index("@media (max-width: 1100px)"):]
+        self.assertIn(".segment-button { min-height: 40px; }", narrow[: narrow.index("\n}") + 2])
         self.assertIn("html { scroll-padding: 8px; }", css)
 
     def test_focus_scrolls_strip_items_and_textareas_fully_into_view(self):
         script = (Path(app_module.STATIC_DIR) / "app.js").read_text(encoding="utf-8")
         handler = script[script.index('document.addEventListener("focusin"'):]
-        handler = handler[: handler.index("});")]
+        handler = handler[: handler.index("\n});")]
         self.assertIn('.settings-nav, .segmented-control', handler)
         self.assertIn('matches("textarea")', handler)
         self.assertIn('scrollIntoView({ block: "nearest", inline: "nearest" })', handler)
