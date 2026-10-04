@@ -1033,6 +1033,8 @@
               "点“取消”＝放弃本次保存，不做任何改动。",
           );
           if (!update) {
+            // The dialog may have stayed open longer than the hold; restart it.
+            statusHeldUntil = Date.now() + 8000;
             setStatus("已取消保存：没有改动任何账号。若确实要新建一个同名账号，请先确认它和已有账号不是同一个人。");
             return;
           }
