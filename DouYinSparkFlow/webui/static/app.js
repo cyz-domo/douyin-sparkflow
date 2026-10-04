@@ -421,6 +421,10 @@
   let timer = null;
   let heartbeatTimer = null;
   let countdownTimer = null;
+  // Until this time the routine lines (lease countdown, status poll) leave the
+  // status text alone, so "saving..." or a save error stays readable.
+  let statusHeldUntil = 0;
+  const statusHeld = () => Date.now() < statusHeldUntil;
   let qrRefreshTimer = null;
   let recoveryTimer = null;
   // How many automatic re-acquisitions one user action may cause. The budget is
@@ -544,13 +548,14 @@
           frameWrap.hidden = false;
           frameWrap.classList.add("native-login-mode");
         }
+        if (statusHeld()) return;
         setStatus(
           promoted
             ? `已轮到你：Windows 本地登录浏览器已打开，剩余 ${remaining} 秒。完成扫码后请保存登录态。`
             : `Windows 本地登录浏览器已打开，剩余 ${remaining} 秒。完成扫码后请保存登录态。`,
           tone,
         );
-      } else {
+      } else if (!statusHeld()) {
         setStatus(
           promoted
             ? `已轮到你：登录工作区已分配给当前会话，剩余 ${remaining} 秒。完成扫码后请保存登录态。`
@@ -773,7 +778,9 @@
       renderWorkspace(data.workspace);
       if (workspace.state === "active" && workspace.active) {
         loadFrame();
-        if (data.logged_in) {
+        if (statusHeld()) {
+          // An in-progress save or its error owns the status line.
+        } else if (data.logged_in) {
           setStatus(`当前浏览器已登录：${data.username}，请保存登录态。`, "success");
         } else if (data.login_state === "unknown") {
           // The page was mid-operation, so "not logged in" would be a guess.
@@ -968,12 +975,14 @@
   // workspace: tens of seconds on this host. Without feedback the operator
   // clicked again, and the second save raced the first one's release.
   let savingTimer = null;
-  const setSaving = (saving) => {
+  const setSaving = (saving, { keepDisabled = false } = {}) => {
     window.clearInterval(savingTimer);
     savingTimer = null;
     document.querySelectorAll(".login-desktop-save").forEach((item) => {
-      item.disabled = saving;
+      item.disabled = saving || keepDisabled;
     });
+    // Whatever is shown next (result or error) stays readable for a while.
+    statusHeldUntil = saving ? Infinity : Date.now() + 8000;
     if (!saving) return;
     const startedAt = Date.now();
     const render = () => {
@@ -1030,7 +1039,7 @@
           setSaving(true);
           data = await saveLogin({ merge_with: candidate.account_ref });
         }
-        setSaving(false);
+        setSaving(false, { keepDisabled: true });
         renderWorkspace(data.workspace);
         if (data.verified === false) {
           // The cookies were stored, but the login state is not usable: show the
@@ -1225,6 +1234,7 @@
     if (workspace.state !== "active" || !workspace.active) return;
     workspace.remaining_seconds = Math.max(0, Number(workspace.remaining_seconds || 0) - 1);
     const remaining = workspace.remaining_seconds;
+    if (statusHeld()) return;
     setStatus(`登录工作区已分配给当前会话，剩余 ${remaining} 秒。完成扫码后请保存登录态。`, remaining <= 60 ? "warning" : "success");
   }, 1000);
   // Releasing the workspace when the page goes away lets the next operator in

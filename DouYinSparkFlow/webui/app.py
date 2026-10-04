@@ -2180,7 +2180,13 @@ def create_app():
         """
         task = asyncio.create_task(_reset_and_promote())
         release_tasks.add(task)
-        task.add_done_callback(release_tasks.discard)
+
+        def finished(done):
+            release_tasks.discard(done)
+            if not done.cancelled() and done.exception():
+                logger.error("Background login workspace release failed", exc_info=done.exception())
+
+        task.add_done_callback(finished)
 
     async def login_workspace_watchdog():
         """Reap abandoned leases even when no browser request arrives."""

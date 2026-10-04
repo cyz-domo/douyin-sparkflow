@@ -494,8 +494,18 @@ class WebUiSafetyTests(unittest.TestCase):
         duplicates = block[block.index("if (candidates.length > 1) {"):block.index("const update = window.confirm(")]
         self.assertGreaterEqual(duplicates.count("setSaving(false);"), 2)
         saving = script[script.index("const setSaving = "):start]
-        self.assertIn("item.disabled = saving;", saving)
+        self.assertIn("item.disabled = saving || keepDisabled;", saving)
         self.assertIn("已等待", saving)
+        # The lease countdown and the status poll must not overwrite the save
+        # progress or its error: they flickered with it every second.
+        self.assertIn("statusHeldUntil = saving ? Infinity : Date.now() + 8000;", saving)
+        countdown = script[script.index("countdownTimer = window.setInterval"):]
+        countdown = countdown[: countdown.index("}, 1000);")]
+        self.assertLess(countdown.index("if (statusHeld()) return;"), countdown.index("setStatus("))
+        poll = script[script.index("const pollStatus = async"):script.index("const heartbeat = async")]
+        self.assertLess(poll.index("if (statusHeld())"), poll.index("当前浏览器已登录"))
+        # After a successful save the page reloads; the buttons stay disabled.
+        self.assertIn("setSaving(false, { keepDisabled: true });", block)
 
     def test_save_and_close_do_not_wait_for_the_next_workspace(self):
         source = Path(app_module.__file__).read_text(encoding="utf-8")
