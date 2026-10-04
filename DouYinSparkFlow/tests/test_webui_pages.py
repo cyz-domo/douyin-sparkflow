@@ -233,6 +233,13 @@ class RedesignedPagesTests(unittest.TestCase):
         self.assertNotIn("box-shadow", rule)
         self.assertIn(".fold > summary:focus-visible", css)
 
+    def test_focused_controls_scroll_clear_of_the_phone_tab_bar(self):
+        css = (Path(app_module.STATIC_DIR) / "app.css").read_text(encoding="utf-8")
+        mobile = css[css.index("@media (max-width: 900px)"):]
+        mobile = mobile[: mobile.index(".tabbar {")]
+        self.assertIn("scroll-padding-bottom: calc(92px + env(safe-area-inset-bottom))", mobile)
+        self.assertIn("scroll-padding-top: 64px", mobile)
+
 
 if __name__ == "__main__":
     unittest.main()

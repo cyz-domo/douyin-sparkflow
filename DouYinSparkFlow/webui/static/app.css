@@ -555,6 +555,8 @@ fieldset > legend { padding: 0 6px; }
 @media (max-width: 900px) {
   .shell { grid-template-columns: 1fr; }
   .rail { display: none; }
+  /* Keep keyboard-focused controls clear of the sticky top bar and the fixed tab bar. */
+  html { scroll-padding-top: 64px; scroll-padding-bottom: calc(92px + env(safe-area-inset-bottom)); }
   .mobile-top {
     display: flex; align-items: center; gap: 10px; position: sticky; top: 0; z-index: 20;
     padding: 10px 16px; background: color-mix(in srgb, var(--bg) 86%, transparent);
