@@ -231,6 +231,7 @@ class RedesignedPagesTests(unittest.TestCase):
         rule = rule[: rule.index("}")]
         self.assertIn("outline: 2px solid var(--flame)", rule)
         self.assertNotIn("box-shadow", rule)
+        self.assertIn(".fold > summary:focus-visible", css)
 
 
 if __name__ == "__main__":

@@ -96,6 +96,8 @@ i[data-lucide] { display: inline-block; width: 18px; height: 18px; flex: none; }
 /* Outline, not box-shadow: buttons and the active nav item carry their own shadows. */
 :focus-visible { outline: 2px solid var(--flame); outline-offset: 2px; }
 input:focus-visible, select:focus-visible, textarea:focus-visible { outline: none; }
+/* These sit edge to edge inside overflow:hidden/auto boxes; draw the ring inside. */
+.fold > summary:focus-visible, .account-row:focus-visible, .settings-nav a:focus-visible { outline-offset: -2px; }
 ::selection { background: color-mix(in srgb, var(--flame) 25%, transparent); }
 
 /* ---------- shell ---------- */
