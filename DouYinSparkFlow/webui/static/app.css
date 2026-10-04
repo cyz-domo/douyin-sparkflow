@@ -144,7 +144,7 @@ html { scroll-padding: 8px; }
 .rail-foot form { margin: 0; }
 
 .main { min-width: 0; }
-.page { padding: 36px clamp(20px, 4vw, 56px) 72px; max-width: 1160px; }
+.page { padding: 36px clamp(20px, 4vw, 56px) 72px; max-width: 1520px; margin-inline: auto; }
 .mobile-top, .tabbar { display: none; }
 
 /* ---------- page head ---------- */

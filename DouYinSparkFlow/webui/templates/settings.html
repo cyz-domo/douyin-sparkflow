@@ -110,7 +110,7 @@
           data-confirm-accept="确认全部重发"
         >
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button class="button button-quiet" type="submit" data-disable-while-running {% if ops.task_lock.running or total == 0 %}disabled{% endif %}>
+          <button class="button button-quiet" type="submit" data-disable-while-running data-action-count-source="total" {% if ops.task_lock.running or total == 0 %}disabled{% endif %}>
             <i data-lucide="send"></i><span>全部重发</span>
           </button>
         </form>

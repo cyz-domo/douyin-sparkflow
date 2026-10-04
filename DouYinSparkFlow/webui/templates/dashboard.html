@@ -57,6 +57,7 @@
     class="button button-primary"
     type="submit"
     data-disable-while-running
+    data-action-count-source="total"
     {% if ops.task_lock.running or total == 0 %}disabled{% endif %}
   >
     <i data-lucide="send"></i><span>全部重发</span>

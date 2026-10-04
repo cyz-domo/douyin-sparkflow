@@ -215,6 +215,22 @@ class RedesignedPagesTests(unittest.TestCase):
     def test_unused_stylesheet_is_gone(self):
         self.assertFalse((Path(app_module.STATIC_DIR) / "styles.css").exists())
 
+    def test_resend_all_stays_disabled_with_nothing_to_send(self):
+        # The overview poll re-enables plain "disable while running" buttons; tie this one to the total.
+        for name in ("dashboard.html", "settings.html"):
+            page = (Path(app_module.TEMPLATES_DIR) / name).read_text(encoding="utf-8")
+            form = page[page.index('action="/ops/run-now"'):]
+            button = form[form.index("<button"): form.index(">", form.index("<button"))]
+            with self.subTest(page=name):
+                self.assertIn('data-action-count-source="total"', button)
+
+    def test_wide_screens_center_the_page(self):
+        css = (Path(app_module.STATIC_DIR) / "app.css").read_text(encoding="utf-8")
+        rule = css[css.index(".page {"):]
+        rule = rule[: rule.index("}")]
+        self.assertIn("max-width: 1520px", rule)
+        self.assertIn("margin-inline: auto", rule)
+
     def test_timeline_marks_the_current_hour(self):
         # nowDisplay is "%m-%d %H:%M" in ops.py; the hour must still be found.
         self._as(ADMIN)
