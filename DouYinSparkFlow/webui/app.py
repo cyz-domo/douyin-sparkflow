@@ -2168,6 +2168,20 @@ def create_app():
     async def _expire_login_workspace():
         return await _reset_and_promote()
 
+    release_tasks = set()
+
+    def _reset_and_promote_later():
+        """Release the workspace without making the leaving operator wait.
+
+        Resetting the login browser and opening it for the next queued person
+        takes seconds to tens of seconds; the save or close that triggered it
+        has already finished and must answer now. The watchdog retries a reset
+        that fails here.
+        """
+        task = asyncio.create_task(_reset_and_promote())
+        release_tasks.add(task)
+        task.add_done_callback(release_tasks.discard)
+
     async def login_workspace_watchdog():
         """Reap abandoned leases even when no browser request arrives."""
         while True:
@@ -2612,7 +2626,7 @@ def create_app():
                 ticket=active.get("ticket", ""),
                 account_ref=active.get("account_ref", ""),
             )
-            await _reset_and_promote()
+            _reset_and_promote_later()
         else:
             cancel_login_request(username=current["username"], session_id=current.get("session_id", ""))
         return JSONResponse({"ok": True, "workspace": _workspace_payload(request)})
@@ -2854,7 +2868,9 @@ def create_app():
         elif operation != "add" and current.get("role") != "admin":
             return JSONResponse({"ok": False, "error": "普通用户必须选择自己的抖音账号"}, status_code=400)
         try:
-            payload = call_login_desktop("/export", method="POST", payload={}, timeout=30)
+            # Off the event loop: exporting reads the live login page and must not
+            # freeze every other request (noVNC, heartbeats) while it runs.
+            payload = await asyncio.to_thread(call_login_desktop, "/export", method="POST", payload={}, timeout=30)
             if not payload.get("ok"):
                 raise RuntimeError("login-desktop export did not return ok")
             exported = payload.get("result", {}) or {}
@@ -2990,7 +3006,9 @@ def create_app():
                 refs = list(dict.fromkeys(list(current.get("account_refs", [])) + [account.get("account_ref", "")]))
                 update_web_user(current["username"], account_refs=refs)
             begin_login_release(username=current["username"], session_id=current.get("session_id", ""), ticket=active.get("ticket", ""), account_ref=active.get("account_ref", ""))
-            await _reset_and_promote()
+            # The account is saved; do not hold the answer until the login
+            # browser is reset and reopened for whoever is queued next.
+            _reset_and_promote_later()
             return JSONResponse({
                 "ok": True,
                 "action": action,

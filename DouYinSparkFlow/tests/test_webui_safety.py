@@ -480,6 +480,36 @@ class WebUiSafetyTests(unittest.TestCase):
         self.assertIn("retries - 1", script)
         self.assertIn('/login-desktop/qr/refresh', script)
 
+    def test_saving_a_login_shows_progress_and_blocks_a_second_click(self):
+        # A second click while the first save was still running raced its
+        # release and failed with a 400; the save must look busy until it ends.
+        script = (Path(app_module.STATIC_DIR) / "app.js").read_text(encoding="utf-8")
+        start = script.index('document.querySelectorAll(".login-desktop-save").forEach((button) =>')
+        block = script[start:script.index('document.querySelectorAll(".login-desktop-close")', start)]
+        self.assertIn("if (button.disabled) return;", block)
+        self.assertLess(block.index("setSaving(true);"), block.index("try {"))
+        catch = block[block.rindex("} catch (error) {"):]
+        self.assertIn("setSaving(false);", catch)
+        # Every early return before the result must end the busy state too.
+        duplicates = block[block.index("if (candidates.length > 1) {"):block.index("const update = window.confirm(")]
+        self.assertGreaterEqual(duplicates.count("setSaving(false);"), 2)
+        saving = script[script.index("const setSaving = "):start]
+        self.assertIn("item.disabled = saving;", saving)
+        self.assertIn("已等待", saving)
+
+    def test_save_and_close_do_not_wait_for_the_next_workspace(self):
+        source = Path(app_module.__file__).read_text(encoding="utf-8")
+        save = source[source.index('@app.post("/login-desktop/save")'):]
+        self.assertIn('await asyncio.to_thread(call_login_desktop, "/export"', save)
+        self.assertIn("_reset_and_promote_later()", save)
+        self.assertNotIn("await _reset_and_promote()", save)
+        close = source[source.index('@app.post("/login-desktop/close")'):source.index('@app.post("/login-desktop/release")')]
+        self.assertIn("_reset_and_promote_later()", close)
+        later = source[source.index("def _reset_and_promote_later"):]
+        later = later[: later.index("release_tasks.discard") + len("release_tasks.discard")]
+        # Keep a reference, or the event loop may drop the running task.
+        self.assertIn("release_tasks.add(task)", later)
+
     def test_add_account_shows_progress_from_the_click(self):
         # Opening a cold login browser takes tens of seconds; the click must
         # answer at once and the button must not invite a second open.

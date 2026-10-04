@@ -964,13 +964,34 @@
     });
   });
 
+  // Saving exports the login, verifies it in a second browser and releases the
+  // workspace: tens of seconds on this host. Without feedback the operator
+  // clicked again, and the second save raced the first one's release.
+  let savingTimer = null;
+  const setSaving = (saving) => {
+    window.clearInterval(savingTimer);
+    savingTimer = null;
+    document.querySelectorAll(".login-desktop-save").forEach((item) => {
+      item.disabled = saving;
+    });
+    if (!saving) return;
+    const startedAt = Date.now();
+    const render = () => {
+      const seconds = Math.round((Date.now() - startedAt) / 1000);
+      setStatus(`正在保存登录账号：读取登录态并验证…已等待 ${seconds} 秒（通常 10–30 秒，请不要重复点击）`, "warning");
+    };
+    render();
+    savingTimer = window.setInterval(render, 1000);
+  };
   document.querySelectorAll(".login-desktop-save").forEach((button) => {
     button.addEventListener("click", async () => {
+      if (button.disabled) return;
       const saveLogin = (extra = {}) =>
         postForm("/login-desktop/save", {
           relogin_unique_id: button.dataset.reloginUniqueId || "",
           ...extra,
         });
+      setSaving(true);
       try {
         resetRecoveryBudget();
         let data;
@@ -984,6 +1005,7 @@
           if (candidates.length > 1) {
             // Guessing here could merge the login into the wrong account, so the
             // operator is asked to resolve the duplicates first.
+            setSaving(false);
             setStatus(
               `有 ${candidates.length} 个同名账号（${candidates
                 .map((item) => item.unique_id || item.account_ref)
@@ -995,6 +1017,7 @@
           // "Cancel" must mean "do nothing": binding it to "create a duplicate
           // anyway" is the opposite of what the button suggests and is how a
           // second identical account gets created by accident.
+          setSaving(false);
           const update = window.confirm(
             `已有一个同名账号（${candidate.username || "未命名"}）。\n\n` +
               "点“确定”＝更新这个已有账号，保留它的目标与发送记录；\n" +
@@ -1004,8 +1027,10 @@
             setStatus("已取消保存：没有改动任何账号。若确实要新建一个同名账号，请先确认它和已有账号不是同一个人。");
             return;
           }
+          setSaving(true);
           data = await saveLogin({ merge_with: candidate.account_ref });
         }
+        setSaving(false);
         renderWorkspace(data.workspace);
         if (data.verified === false) {
           // The cookies were stored, but the login state is not usable: show the
@@ -1035,6 +1060,7 @@
         closeFrame();
         window.setTimeout(() => window.location.reload(), 800);
       } catch (error) {
+        setSaving(false);
         if (error.payload && error.payload.leaseLost) {
           // The workspace moved on while the operator was finishing the scan;
           // report the real condition instead of a generic save failure.
