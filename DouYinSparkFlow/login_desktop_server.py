@@ -56,21 +56,23 @@ LOGIN_NETWORK_CACHE_SECONDS = max(
 # Everything in the profile that can carry a signed-in session or personal data.
 # The HTTP and code caches stay, so the next login page loads warm.
 LOGIN_DATA_PATHS = (
-    "Default/Cookies",
-    "Default/Cookies-journal",
-    "Default/Network/Cookies",
-    "Default/Network/Cookies-journal",
+    "Default/Cookies*",
+    "Default/Network/Cookies*",
+    "Default/Network/Trust Tokens*",
     "Default/Local Storage",
     "Default/Session Storage",
+    "Default/Sessions",
     "Default/IndexedDB",
     "Default/Service Worker",
     "Default/WebStorage",
+    "Default/SharedStorage*",
     "Default/File System",
     "Default/Storage",
-    "Default/Login Data",
-    "Default/Login Data-journal",
-    "Default/Web Data",
-    "Default/Web Data-journal",
+    "Default/databases",
+    "Default/blob_storage",
+    "Default/Login Data*",
+    "Default/Web Data*",
+    "Default/Account Web Data*",
 )
 # Upper bound for one GET /qr?wait=N; the WebUI proxy waits a little longer.
 QR_MAX_WAIT_SECONDS = 12
@@ -99,15 +101,16 @@ GENERIC_WWW_NAMES = {
 
 def _purge_login_data(profile_dir):
     """Delete the signed-in session from a closed profile, keeping its caches."""
-    for relative in LOGIN_DATA_PATHS:
-        target = Path(profile_dir) / relative
-        try:
-            if target.is_dir():
-                shutil.rmtree(target, ignore_errors=True)
-            elif target.exists():
-                target.unlink()
-        except OSError:
-            logger.warning("Could not remove login data %s", relative, exc_info=True)
+    for pattern in LOGIN_DATA_PATHS:
+        # Globs cover SQLite companions (-journal, -wal, -shm) and variants.
+        for target in Path(profile_dir).glob(pattern):
+            try:
+                if target.is_dir():
+                    shutil.rmtree(target, ignore_errors=True)
+                else:
+                    target.unlink()
+            except OSError:
+                logger.warning("Could not remove login data %s", target.name, exc_info=True)
 
 
 def _api_bind_address():
@@ -348,6 +351,9 @@ class LoginDesktopManager:
             if self.context and not self._context_is_closed():
                 return
             PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+            # A browser that crashed or was killed never went through stop(), so
+            # its session may still be on disk; never start on someone's login.
+            await asyncio.to_thread(_purge_login_data, PROFILE_DIR)
             if self.playwright:
                 try:
                     await self.playwright.stop()
@@ -440,7 +446,7 @@ class LoginDesktopManager:
             if clear_profile and PROFILE_DIR.exists():
                 shutil.rmtree(PROFILE_DIR, ignore_errors=True)
             elif PROFILE_DIR.exists():
-                _purge_login_data(PROFILE_DIR)
+                await asyncio.to_thread(_purge_login_data, PROFILE_DIR)
             self._status_cache = None
             self._status_checked_at = 0.0
 
@@ -1105,6 +1111,11 @@ async def login_qr(wait: float = 0):
             code, message = QR_ERROR_SPECS["qr_page_busy"]
             return _qr_error(code, "qr_page_busy", message, retry_after=1)
         await asyncio.sleep(0.25)
+    if not manager.context or manager._context_is_closed():
+        # Reading the QR code must not launch a browser (for example right
+        # after /close); only opening the workspace does that.
+        code, message = QR_ERROR_SPECS["qr_not_ready"]
+        return _qr_error(code, "qr_not_ready", message, retry_after=1)
     try:
         page = await manager._get_active_page()
     except LoginNetworkError as exc:
@@ -1120,7 +1131,14 @@ async def login_qr(wait: float = 0):
             outcome, data = await asyncio.wait_for(_probe_login_qr(page), timeout=max(remaining, 3.0))
         except asyncio.TimeoutError:
             outcome, data = "not_ready", None
+        except Exception:
+            # The page navigated or closed mid-probe; that is "not ready yet",
+            # not an upstream failure that would stop the page's QR wait.
+            outcome, data = "not_ready", None
         if outcome != "not_ready" or loop.time() + 0.5 >= deadline:
+            break
+        # A page operation (open, refresh) or a closed page ends this wait early.
+        if manager._page_operation_lock.locked() or page.is_closed():
             break
         await asyncio.sleep(0.5)
 

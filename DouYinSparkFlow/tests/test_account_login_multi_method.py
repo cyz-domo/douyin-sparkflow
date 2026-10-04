@@ -1019,6 +1019,42 @@ class FriendRefreshEndpointTests(unittest.TestCase):
 class LoginDesktopQrPayloadTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(login_desktop_server.app)
+        # GET /qr only reads a running browser; pretend one is up.
+        for target, value in (("context", object()), ("_context_is_closed", lambda: False)):
+            patcher = patch.object(login_desktop_server.manager, target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_qr_does_not_launch_a_browser(self):
+        with (
+            patch.object(login_desktop_server.manager, "context", None),
+            patch.object(login_desktop_server.manager, "start") as start,
+        ):
+            response = self.client.get("/qr?wait=1")
+        self.assertEqual(202, response.status_code)
+        self.assertEqual("qr_not_ready", response.json()["state"])
+        start.assert_not_called()
+
+    def test_qr_probe_error_is_not_an_upstream_failure(self):
+        # A navigation or closed page mid-probe must read as "not ready", or the
+        # proxy turns the 500 into "Douyin unreachable" and the page stops.
+        async def broken(page):
+            raise RuntimeError("Execution context was destroyed")
+
+        class FakePage:
+            def is_closed(self):
+                return False
+
+        async def fake_page():
+            return FakePage()
+
+        with (
+            patch.object(login_desktop_server.manager, "_get_active_page", side_effect=fake_page),
+            patch.object(login_desktop_server, "_probe_login_qr", side_effect=broken),
+        ):
+            response = self.client.get("/qr?wait=1")
+        self.assertEqual(202, response.status_code)
+        self.assertEqual("qr_not_ready", response.json()["state"])
 
     def test_qr_reports_not_ready_with_retry_after(self):
         class Candidate:
@@ -1059,8 +1095,12 @@ class LoginDesktopQrPayloadTests(unittest.TestCase):
             calls["n"] += 1
             return ("qr", b"png-bytes") if calls["n"] >= 3 else ("not_ready", None)
 
+        class FakePage:
+            def is_closed(self):
+                return False
+
         async def fake_page():
-            return object()
+            return FakePage()
 
         with (
             patch.object(login_desktop_server.manager, "_get_active_page", side_effect=fake_page),

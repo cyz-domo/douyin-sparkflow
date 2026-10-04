@@ -825,7 +825,11 @@
         // renderWorkspace; loading it again here reloaded noVNC mid-connect.
         // Re-opening a workspace this session already holds keeps the ticket,
         // so only then start them here.
-        if (lastPromotedTicket === promotedBefore) {
+        if (!workspace.active) {
+          // Granted and immediately lost (a racing release): nothing will
+          // finish the feedback, so end it here.
+          stopOpening();
+        } else if (lastPromotedTicket === promotedBefore) {
           loadFrame(true);
           qrPollStartedAt = Date.now();
           refreshLoginQr(500);
