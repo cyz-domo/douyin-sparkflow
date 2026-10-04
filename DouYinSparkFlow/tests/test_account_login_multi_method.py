@@ -1,5 +1,7 @@
 import asyncio
 import json
+import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -1047,8 +1049,71 @@ class LoginDesktopQrPayloadTests(unittest.TestCase):
         body = response.json()
         self.assertEqual(202, response.status_code)
         self.assertEqual("qr_not_ready", body["state"])
-        self.assertEqual(2, body["retry_after"])
+        self.assertEqual(1, body["retry_after"])
         self.assertTrue(body["retryable"])
+
+    def test_qr_wait_holds_the_request_until_the_code_appears(self):
+        calls = {"n": 0}
+
+        async def probe(page):
+            calls["n"] += 1
+            return ("qr", b"png-bytes") if calls["n"] >= 3 else ("not_ready", None)
+
+        async def fake_page():
+            return object()
+
+        with (
+            patch.object(login_desktop_server.manager, "_get_active_page", side_effect=fake_page),
+            patch.object(login_desktop_server, "_probe_login_qr", side_effect=probe),
+        ):
+            response = self.client.get("/qr?wait=5")
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("image/png", response.headers["content-type"])
+        self.assertEqual(3, calls["n"])
+
+    def test_qr_wait_is_bounded_when_the_page_hangs(self):
+        async def hang(page):
+            await asyncio.sleep(60)
+
+        async def fake_page():
+            return object()
+
+        started = time.monotonic()
+        with (
+            patch.object(login_desktop_server, "QR_MAX_WAIT_SECONDS", 1),
+            patch.object(login_desktop_server.manager, "_get_active_page", side_effect=fake_page),
+            patch.object(login_desktop_server, "_probe_login_qr", side_effect=hang),
+        ):
+            response = self.client.get("/qr?wait=30")
+
+        self.assertEqual(202, response.status_code)
+        self.assertEqual("qr_not_ready", response.json()["state"])
+        # One bounded probe (at least 3s) past the 1s wait, never the 60s hang.
+        self.assertLess(time.monotonic() - started, 8)
+
+    def test_close_keeps_the_browser_cache_but_drops_the_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = Path(tmp)
+            for relative in ("Default/Network/Cookies", "Default/Local Storage/leveldb/x.log",
+                             "Default/IndexedDB/https_creator.douyin.com_0/x", "Default/Login Data",
+                             "Default/Cache/Cache_Data/f_0001", "Default/Code Cache/js/abc"):
+                target = profile / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"x")
+            with (
+                patch.object(login_desktop_server, "PROFILE_DIR", profile),
+                patch.object(login_desktop_server.manager, "context", None),
+                patch.object(login_desktop_server.manager, "page", None),
+                patch.object(login_desktop_server.manager, "playwright", None),
+            ):
+                response = self.client.post("/close")
+
+            self.assertEqual(200, response.status_code)
+            for gone in ("Default/Network/Cookies", "Default/Local Storage", "Default/IndexedDB", "Default/Login Data"):
+                self.assertFalse((profile / gone).exists(), gone)
+            for kept in ("Default/Cache/Cache_Data/f_0001", "Default/Code Cache/js/abc"):
+                self.assertTrue((profile / kept).exists(), kept)
 
     def test_qr_reports_busy_when_page_lock_is_held(self):
         with patch.object(

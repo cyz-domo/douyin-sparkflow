@@ -120,6 +120,9 @@ BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = BASE_DIR / "templates"
 STATIC_DIR = BASE_DIR / "static"
 DEBUG_ARTIFACTS_DIR = BASE_DIR.parent / "logs" / "debug_artifacts"
+# Seconds one /login-desktop/qr request waits upstream for a QR code; the upstream
+# adds at most ~3s on top, well inside the 20s proxy timeout.
+LOGIN_QR_WAIT_SECONDS = 10
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 templates.env.globals["cache_age_label"] = cache_age_label
 templates.env.globals["duplicate_display_names"] = duplicate_display_names
@@ -2145,18 +2148,18 @@ def create_app():
                 return True, None
             try:
                 try:
-                    call_login_desktop("/close", method="POST", payload={}, timeout=60)
+                    await asyncio.to_thread(call_login_desktop, "/close", method="POST", payload={}, timeout=60)
                 except RuntimeError:
                     # Older login-desktop images do not have /close; reset is
                     # still safe because it clears the temporary login profile.
-                    call_login_desktop("/reset", method="POST", payload={}, timeout=120)
+                    await asyncio.to_thread(call_login_desktop, "/reset", method="POST", payload={}, timeout=120)
             except RuntimeError as exc:
                 logger.error("Failed to reset login workspace: %s", exc)
                 return False, None
             promoted = finish_login_transition()
             if promoted:
                 try:
-                    call_login_desktop("/open-login", method="POST", payload={}, timeout=90)
+                    await asyncio.to_thread(call_login_desktop, "/open-login", method="POST", payload={}, timeout=90)
                 except RuntimeError as exc:
                     logger.error("Failed to open login workspace for queued user: %s", exc)
                     return False, promoted
@@ -2292,7 +2295,9 @@ def create_app():
         lock_error = login_lock_required(request)
         if lock_error:
             return lock_error
-        url = f"{login_desktop_api_url()}/qr"
+        # The login service holds the request until a QR code shows up (bounded),
+        # so the page does not have to poll in a tight loop.
+        url = f"{login_desktop_api_url()}/qr?wait={LOGIN_QR_WAIT_SECONDS}"
         try:
             upstream_request = urllib.request.Request(
                 url,
@@ -2579,7 +2584,8 @@ def create_app():
         if result["state"] == "queued":
             return JSONResponse({"ok": True, "state": "queued", "workspace": _workspace_payload(request)}, status_code=202)
         try:
-            call_login_desktop("/open-login", method="POST", payload={}, timeout=90)
+            # Off the event loop: opening takes seconds and must not stall other requests.
+            await asyncio.to_thread(call_login_desktop, "/open-login", method="POST", payload={}, timeout=90)
             return JSONResponse({"ok": True, "state": "active", "public_url": login_desktop_public_url(request), "workspace": _workspace_payload(request)})
         except RuntimeError as exc:
             begin_login_release(username=current["username"], session_id=current.get("session_id", ""), ticket=result["request"].get("ticket", ""), account_ref=account_ref)

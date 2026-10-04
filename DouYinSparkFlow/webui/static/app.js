@@ -530,9 +530,8 @@
         // re-fetching the QR code on every poll burns the single login-desktop
         // page lock and makes the whole login flow feel sluggish.
         lastPromotedTicket = workspace.ticket;
-        // A new workspace starts with a fresh QR poll budget, whichever path
-        // granted it (user click or automatic recovery).
-        qrNotReadyAttempts = 0;
+        // A new workspace starts a fresh QR wait, whichever path granted it
+        // (user click or automatic recovery).
         if (section && !section.open) section.open = true;
         loadFrame(true);
         qrPollStartedAt = Date.now();
@@ -566,10 +565,11 @@
 
   let qrPollStartedAt = 0;
   let lastPromotedTicket = "";
-  let qrNotReadyAttempts = 0;
-  // About 25 seconds at the default 3-second pacing; the live page usually
-  // needs two or three not-ready polls, so a smaller cap stops too early.
-  const QR_NOT_READY_LIMIT = 8;
+  // How long to keep waiting for a QR code after the workspace opened. Each
+  // GET /qr already waits upstream for the code, so the page only re-asks
+  // about a second after each answer.
+  const QR_WAIT_LIMIT_MS = 60000;
+  const QR_RETRY_MS = 1000;
   let recoveringLease = false;
   let recoverAttempts = 0;
   let acquiringWorkspace = false;
@@ -580,7 +580,43 @@
       button.disabled = busy;
       button.dataset.qrStopped = stopped ? "1" : "";
     });
+    // Any final QR outcome (shown, expired, stopped) ends the opening feedback.
+    if (!busy) stopOpening();
   };
+
+  // From the click until a QR code shows, starting the login browser and
+  // rendering the Douyin page takes tens of seconds on this host; say so and
+  // count, instead of leaving both panes blank and the button clickable.
+  const qrPlaceholder = document.querySelector(".qr-placeholder span");
+  const qrPlaceholderText = qrPlaceholder ? qrPlaceholder.textContent : "";
+  let openingTimer = null;
+  let openingStartedAt = 0;
+  const renderOpening = () => {
+    const seconds = Math.round((Date.now() - openingStartedAt) / 1000);
+    const text = `正在启动登录浏览器…已等待 ${seconds} 秒（通常 20 秒左右）`;
+    if (qrPlaceholder) qrPlaceholder.textContent = text;
+    if (frameWrap) frameWrap.dataset.progress = text;
+  };
+  const startOpening = () => {
+    window.clearInterval(openingTimer);
+    openingStartedAt = Date.now();
+    document.querySelectorAll(".login-desktop-open").forEach((button) => {
+      button.disabled = true;
+    });
+    renderOpening();
+    openingTimer = window.setInterval(renderOpening, 1000);
+  };
+  function stopOpening() {
+    if (!openingStartedAt) return;
+    window.clearInterval(openingTimer);
+    openingTimer = null;
+    openingStartedAt = 0;
+    document.querySelectorAll(".login-desktop-open").forEach((button) => {
+      button.disabled = false;
+    });
+    if (qrPlaceholder) qrPlaceholder.textContent = qrPlaceholderText;
+    if (frameWrap) delete frameWrap.dataset.progress;
+  }
   const qrWaitLabel = () => {
     if (!qrPollStartedAt) return "";
     return `（已等待 ${Math.round((Date.now() - qrPollStartedAt) / 1000)} 秒）`;
@@ -635,17 +671,15 @@
           // POST /qr/refresh reloads the shared Douyin login page while the
           // operator may be scanning in the noVNC frame, because the page lock
           // is global.
-          qrNotReadyAttempts += 1;
-          if (qrNotReadyAttempts >= QR_NOT_READY_LIMIT) {
+          if (Date.now() - qrPollStartedAt >= QR_WAIT_LIMIT_MS) {
             if (qrStatus) {
               qrStatus.textContent = (data.message || "浏览器仍未生成二维码") + " 请点击“刷新二维码”重试，或稍后再试。";
             }
             setQrButtons("已停止，点此重试", { stopped: true });
             return;
           }
-          // Honour the server's own pacing hint when it gives one.
-          const retryHint = Number(response.headers.get("Retry-After") || data.retry_after || 0);
-          retryLater(data.message || "浏览器正在生成二维码", retryHint > 0 ? retryHint * 1000 : 3000);
+          // The request itself already waited upstream, so ask again soon.
+          retryLater(data.message || "浏览器正在生成二维码", QR_RETRY_MS);
           return;
         }
         if (response.status === 503) {
@@ -697,7 +731,6 @@
         qrImage.dataset.objectUrl = objectUrl;
         qrImage.hidden = false;
         if (previous) URL.revokeObjectURL(previous);
-        qrNotReadyAttempts = 0;
         if (qrStatus) qrStatus.textContent = `二维码已加载。如果过期，点击刷新。${qrWaitLabel()}`;
         setQrButtons("刷新二维码");
       } catch {
@@ -773,6 +806,7 @@
   document.querySelectorAll(".login-desktop-open").forEach((button) => {
     button.addEventListener("click", async () => {
       if (section) section.open = true;
+      startOpening();
       try {
         resetRecoveryBudget();
         const reloginUniqueId = button.dataset.reloginUniqueId || "";
@@ -781,16 +815,24 @@
           mode,
           ...(reloginUniqueId ? { relogin_unique_id: reloginUniqueId } : {}),
         });
+        const promotedBefore = lastPromotedTicket;
         renderWorkspace(data.workspace);
-        if (data.state === "queued") return;
-        loadFrame(true);
-        // Start a fresh poll budget: re-opening an already-held workspace keeps the
-        // same ticket, so the promote branch above does not fire and a stale
-        // counter would stop the new poll after a single 202.
-        qrNotReadyAttempts = 0;
-        refreshLoginQr(500);
+        if (data.state === "queued") {
+          stopOpening();
+          return;
+        }
+        // A fresh grant already loaded the frame and started the QR wait in
+        // renderWorkspace; loading it again here reloaded noVNC mid-connect.
+        // Re-opening a workspace this session already holds keeps the ticket,
+        // so only then start them here.
+        if (lastPromotedTicket === promotedBefore) {
+          loadFrame(true);
+          qrPollStartedAt = Date.now();
+          refreshLoginQr(500);
+        }
         if (frame) frame.scrollIntoView({ behavior: "smooth", block: "start" });
       } catch (error) {
+        stopOpening();
         setStatus(`申请登录工作区失败：${error.message}`, "danger");
       }
     });
@@ -846,11 +888,11 @@
           qrStatus.textContent = data.message || "检测到浏览器里还保留着登录状态，已重置，正在生成新的二维码...";
         }
       }
-      qrNotReadyAttempts = 0;
+      qrPollStartedAt = Date.now();
       refreshLoginQr(1200);
       return;
     }
-    qrNotReadyAttempts = 0;
+    qrPollStartedAt = Date.now();
     refreshLoginQr(500);
   };
 
@@ -1049,9 +1091,9 @@
   };
   const applyWorkspace = (data, { openFrame = false, pollQr = false } = {}) => {
     workspace = trackWorkspace(data.workspace);
-    // Granting a workspace starts a fresh QR poll budget even though this path
+    // Granting a workspace starts a fresh QR wait even though this path
     // assigns `workspace` first (so renderWorkspace's promote branch is skipped).
-    if (workspace.state === "active" && workspace.active) qrNotReadyAttempts = 0;
+    if (workspace.state === "active" && workspace.active) qrPollStartedAt = Date.now();
     renderWorkspace(workspace);
     if (openFrame && data.state !== "queued") loadFrame(true);
     if (pollQr && data.state !== "queued" && workspace.active) refreshLoginQr(500);
@@ -1096,7 +1138,7 @@
     window.clearTimeout(recoveryTimer);
     recoveryTimer = null;
     workspace = { state: "closed", active: false, position: 0, ticket: "" };
-    qrNotReadyAttempts = 0;
+    qrPollStartedAt = 0;
     lastPromotedTicket = "";
     closeFrame();
     setRecoverVisible(true);

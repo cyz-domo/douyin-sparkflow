@@ -480,6 +480,43 @@ class WebUiSafetyTests(unittest.TestCase):
         self.assertIn("retries - 1", script)
         self.assertIn('/login-desktop/qr/refresh', script)
 
+    def test_add_account_shows_progress_from_the_click(self):
+        # Opening a cold login browser takes tens of seconds; the click must
+        # answer at once and the button must not invite a second open.
+        script = (Path(app_module.STATIC_DIR) / "app.js").read_text(encoding="utf-8")
+        # The click handler, not startOpening(), which also walks these buttons.
+        block_start = script.index('button.addEventListener("click", async () => {\n      if (section) section.open = true;')
+        block = script[block_start:script.index('document.querySelectorAll("[data-focus-native-browser]")', block_start)]
+        self.assertLess(block.index("startOpening()"), block.index('postForm("/login-desktop/open"'))
+        self.assertGreaterEqual(block.count("stopOpening()"), 2)  # queued and failure
+        opening = script[script.index("const renderOpening = "):script.index("function stopOpening()")]
+        self.assertIn("button.disabled = true", opening)
+        self.assertIn("已等待", opening)
+        self.assertIn("frameWrap.dataset.progress", script[script.index("const renderOpening = "):])
+        buttons = script[script.index("const setQrButtons = "):script.index("const qrPlaceholder = ")]
+        self.assertIn("if (!busy) stopOpening();", buttons)
+        css = (Path(app_module.STATIC_DIR) / "app.css").read_text(encoding="utf-8")
+        self.assertIn("content: attr(data-progress)", css)
+
+    def test_a_fresh_grant_loads_the_remote_browser_once(self):
+        # renderWorkspace already loads the frame for a new ticket; loading it
+        # again in the click handler reconnected noVNC mid-handshake.
+        script = (Path(app_module.STATIC_DIR) / "app.js").read_text(encoding="utf-8")
+        # The click handler, not startOpening(), which also walks these buttons.
+        block_start = script.index('button.addEventListener("click", async () => {\n      if (section) section.open = true;')
+        block = script[block_start:script.index('document.querySelectorAll("[data-focus-native-browser]")', block_start)]
+        guard = block.index("if (lastPromotedTicket === promotedBefore) {")
+        self.assertLess(guard, block.index("loadFrame(true)"))
+        self.assertLess(block.index("const promotedBefore = lastPromotedTicket;"), block.index("renderWorkspace(data.workspace)"))
+
+    def test_qr_proxy_waits_upstream_and_open_does_not_block(self):
+        source = Path(app_module.__file__).read_text(encoding="utf-8")
+        self.assertIn('/qr?wait={LOGIN_QR_WAIT_SECONDS}', source)
+        # Upstream may add ~3s to the wait; it must stay inside the 20s proxy timeout.
+        self.assertLessEqual(app_module.LOGIN_QR_WAIT_SECONDS + 3, 20)
+        self.assertIn('await asyncio.to_thread(call_login_desktop, "/open-login"', source)
+        self.assertNotIn('            call_login_desktop("/open-login"', source)
+
     def test_runtime_pill_follows_the_workspace_state(self):
         # A held workspace is warning-toned close to its lease renewal; the
         # label must still say it is in use, not that the operator is queued.
@@ -516,7 +553,7 @@ class WebUiSafetyTests(unittest.TestCase):
         self.assertIn('workspace = { state: "closed", active: false, position: 0, ticket: "" };', script)
         recover_start = script.index("const recoverLease")
         reset_block = script[recover_start:script.index('querySelectorAll("[data-recover-login-workspace]")', recover_start)]
-        for reset in ("qrNotReadyAttempts = 0", 'lastPromotedTicket = ""', "closeFrame()", "setRecoverVisible(true)"):
+        for reset in ("qrPollStartedAt = 0", 'lastPromotedTicket = ""', "closeFrame()", "setRecoverVisible(true)"):
             self.assertIn(reset, reset_block)
         # Inside the QR poll, 423 must be classified and recovered BEFORE the
         # "page is busy" fallback, otherwise the retry loop swallows it again.
@@ -535,9 +572,13 @@ class WebUiSafetyTests(unittest.TestCase):
         # A never-ready QR code must stop polling and hand control back to the
         # operator; it must not keep POSTing /qr/refresh, because every refresh
         # reloads the shared Douyin login page under the operator's cursor.
-        self.assertIn("qrNotReadyAttempts", script)
-        self.assertIn("const QR_NOT_READY_LIMIT = 8;", script)
-        self.assertIn("qrNotReadyAttempts >= QR_NOT_READY_LIMIT", script)
+        # The wait is bounded by time since the workspace opened (each GET /qr
+        # already waits upstream), and a not-ready answer is re-asked after ~1s.
+        self.assertIn("const QR_WAIT_LIMIT_MS = 60000;", script)
+        self.assertIn("const QR_RETRY_MS = 1000;", script)
+        self.assertIn("if (Date.now() - qrPollStartedAt >= QR_WAIT_LIMIT_MS) {", script)
+        self.assertIn('retryLater(data.message || "浏览器正在生成二维码", QR_RETRY_MS);', script)
+        self.assertNotIn("qrNotReadyAttempts", script)
         self.assertIn("const refreshLoginQr = async (delay = 0, retries = 40) => {", script)
         self.assertIn('setQrButtons("已停止，点此重试", { stopped: true })', script)
         self.assertNotIn("qrAutoRefreshes", script)
@@ -592,11 +633,11 @@ class WebUiSafetyTests(unittest.TestCase):
         # The automatic pollers must never re-acquire: acquireWorkspace may only
         # be called from the budgeted timer, so pin the call-site count.
         self.assertEqual(1, script.count("acquireWorkspace()"), "acquireWorkspace must have exactly one call site")
-        # A newly granted workspace gets a fresh QR poll budget on either path.
+        # A newly granted workspace starts a fresh QR wait on either path.
         promote_block = script[script.index("if (promoted) {"):script.index("if (displayMode === \"native\") {")]
-        self.assertIn("qrNotReadyAttempts = 0", promote_block)
+        self.assertIn("qrPollStartedAt = Date.now()", promote_block)
         apply_fn = script[script.index("const applyWorkspace"):script.index("const acquireWorkspace")]
-        self.assertIn("qrNotReadyAttempts = 0", apply_fn)
+        self.assertIn("qrPollStartedAt = Date.now()", apply_fn)
         # Every deliberate user action renews the budget.
         self.assertGreaterEqual(script.count("resetRecoveryBudget()"), 4)
         self.assertNotIn("requestQrRefresh({", script)

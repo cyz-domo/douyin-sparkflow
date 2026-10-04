@@ -459,6 +459,7 @@ fieldset > legend { padding: 0 6px; }
 .desktop-frame-wrap:has(.desktop-frame:not([src])):not(.native-login-mode)::before {
   content: "登录浏览器会在打开登录工作区后显示在这里"; display: grid; place-items: center; color: var(--ink-3); font-size: 14px; padding: 40px; text-align: center;
 }
+.desktop-frame-wrap[data-progress]:has(.desktop-frame:not([src])):not(.native-login-mode)::before { content: attr(data-progress); color: var(--ink-2); }
 .native-login-panel { display: grid; gap: 12px; justify-items: center; text-align: center; padding: 48px 24px; align-content: center; }
 .native-login-panel svg { width: 40px; height: 40px; color: var(--flame); }
 .relogin-banner { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 14px 18px; border-radius: var(--radius-sm); background: var(--spark-soft); margin-bottom: 18px; }
