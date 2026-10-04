@@ -480,6 +480,16 @@ class WebUiSafetyTests(unittest.TestCase):
         self.assertIn("retries - 1", script)
         self.assertIn('/login-desktop/qr/refresh', script)
 
+    def test_runtime_pill_follows_the_workspace_state(self):
+        # A held workspace is warning-toned close to its lease renewal; the
+        # label must still say it is in use, not that the operator is queued.
+        script = (Path(app_module.STATIC_DIR) / "app.js").read_text(encoding="utf-8")
+        start = script.index("const setStatus = ")
+        block = script[start:script.index("const postForm = ", start)]
+        self.assertNotIn('tone === "warning" ? "排队中"', block)
+        self.assertIn('state === "active"', block)
+        self.assertIn('state === "queued"', block)
+
     def test_qr_upstream_failure_leaves_the_refresh_button_usable(self):
         # A 502 ends the QR poll; the button the grant set to "读取中…" must be
         # re-enabled, or the copy's "点击刷新二维码" cannot be acted on.

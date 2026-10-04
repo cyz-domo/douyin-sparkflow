@@ -444,7 +444,19 @@
     if (statusText) statusText.textContent = text;
     if (runtimeState) {
       runtimeState.className = `pill${tone ? ` ${tone}` : ""}`;
-      runtimeState.textContent = tone === "success" ? "使用中" : tone === "danger" ? "异常" : tone === "warning" ? "排队中" : "已关闭";
+      // The label follows the workspace state; the tone only colours it. A
+      // held workspace near its lease renewal is warning-toned but still in use.
+      const state = workspace ? workspace.state : "";
+      runtimeState.textContent =
+        tone === "danger"
+          ? "异常"
+          : state === "active"
+            ? "使用中"
+            : state === "queued"
+              ? "排队中"
+              : state === "resetting"
+                ? "清理中"
+                : "空闲";
     }
   };
 
