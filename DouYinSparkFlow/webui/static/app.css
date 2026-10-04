@@ -556,7 +556,7 @@ fieldset > legend { padding: 0 6px; }
   .shell { grid-template-columns: 1fr; }
   .rail { display: none; }
   /* Keep keyboard-focused controls clear of the sticky top bar and the fixed tab bar. */
-  html { scroll-padding-top: 64px; scroll-padding-bottom: calc(92px + env(safe-area-inset-bottom)); }
+  html { scroll-padding-top: 68px; scroll-padding-bottom: calc(92px + env(safe-area-inset-bottom)); }
   .mobile-top {
     display: flex; align-items: center; gap: 10px; position: sticky; top: 0; z-index: 20;
     padding: 10px 16px; background: color-mix(in srgb, var(--bg) 86%, transparent);
@@ -591,7 +591,7 @@ fieldset > legend { padding: 0 6px; }
   .fold > summary .summary-metrics { order: 3; width: 100%; justify-content: flex-start; padding-left: 50px; }
   .fold-body { padding: 16px; }
   .section-head { margin-top: 30px; }
-  .settings-section { scroll-margin-top: 80px; }
+  .settings-section { scroll-margin-top: 12px; }
   .desktop-frame { height: 64vh; }
   .tabbar {
     display: grid; grid-template-columns: repeat(var(--tabs, 5), minmax(0, 1fr));
