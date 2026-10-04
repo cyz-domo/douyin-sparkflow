@@ -98,6 +98,9 @@ i[data-lucide] { display: inline-block; width: 18px; height: 18px; flex: none; }
 input:focus-visible, select:focus-visible, textarea:focus-visible { outline: none; }
 /* These sit edge to edge inside overflow:hidden/auto boxes; draw the ring inside. */
 .fold > summary:focus-visible, .account-row:focus-visible, .settings-nav a:focus-visible { outline-offset: -2px; }
+/* Room for the ring when focus scrolls something to the viewport or strip edge. */
+html { scroll-padding: 8px; }
+.segmented-control, .settings-nav { scroll-padding-inline: 8px; }
 ::selection { background: color-mix(in srgb, var(--flame) 25%, transparent); }
 
 /* ---------- shell ---------- */
@@ -471,7 +474,7 @@ fieldset > legend { padding: 0 6px; }
 .settings-nav a { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 10px; color: var(--ink-2); text-decoration: none; font-size: 14px; font-weight: 500; }
 .settings-nav a:hover { background: var(--surface); color: var(--ink); }
 .settings-nav a.active { background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
-.settings-section { scroll-margin-top: 24px; }
+.settings-section { scroll-margin-top: 16px; }
 .settings-section + .settings-section { margin-top: 18px; }
 .settings-section > .card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 18px; flex-wrap: wrap; }
 .settings-section h2 { font-size: 18px; display: flex; align-items: center; gap: 10px; }
@@ -550,6 +553,7 @@ fieldset > legend { padding: 0 6px; }
   .settings-layout { grid-template-columns: 1fr; }
   .settings-nav { position: static; display: flex; overflow-x: auto; gap: 4px; padding-bottom: 2px; scrollbar-width: none; }
   .settings-nav a { white-space: nowrap; }
+  .segment-button { min-height: 40px; }
 }
 
 @media (max-width: 900px) {

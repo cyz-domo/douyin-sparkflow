@@ -1420,6 +1420,15 @@ window.addEventListener("DOMContentLoaded", () => {
   }
 });
 
+// Chromium does not scroll a half-hidden item of a sideways-scrolling strip into view on Tab,
+// and for a textarea it only reveals the caret line.
+document.addEventListener("focusin", (event) => {
+  const item = event.target;
+  if (!(item instanceof Element)) return;
+  if (!item.matches("textarea") && !item.closest(".settings-nav, .segmented-control")) return;
+  item.scrollIntoView({ block: "nearest", inline: "nearest" });
+});
+
 (() => {
   const form = document.querySelector("[data-schedule-preview-url]");
   if (!form) return;
