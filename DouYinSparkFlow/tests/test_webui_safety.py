@@ -448,6 +448,14 @@ class WebUiSafetyTests(unittest.TestCase):
         self.assertIn("retries - 1", script)
         self.assertIn('/login-desktop/qr/refresh', script)
 
+    def test_qr_upstream_failure_leaves_the_refresh_button_usable(self):
+        # A 502 ends the QR poll; the button the grant set to "读取中…" must be
+        # re-enabled, or the copy's "点击刷新二维码" cannot be acted on.
+        script = (Path(app_module.STATIC_DIR) / "app.js").read_text(encoding="utf-8")
+        start = script.index("if (response.status === 502) {")
+        end = script.index("if (response.status === 401) {", start)
+        self.assertIn('setQrButtons("已停止，点此重试", { stopped: true });', script[start:end])
+
     def test_login_workspace_recovers_when_the_lease_is_gone(self):
         """A 423 means "this session does not hold the lease", not "the page is slow".
 

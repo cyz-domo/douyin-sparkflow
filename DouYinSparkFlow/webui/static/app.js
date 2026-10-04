@@ -657,6 +657,9 @@
                 ? "无法访问抖音（网络或代理异常），请检查代理后重试。"
                 : "登录桌面服务暂时不可用，请稍后点击刷新二维码。");
           }
+          // Polling stops here, so the refresh button must not stay disabled
+          // from the "读取中…" state the grant put it in.
+          setQrButtons("已停止，点此重试", { stopped: true });
           return;
         }
         if (response.status === 401) {
