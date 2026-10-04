@@ -2338,9 +2338,27 @@ def create_app():
                     status_code=exc.code,
                     retry_after=_header_value(exc.headers, "Retry-After") or "2",
                 )
-            return PlainTextResponse("login QR service is unavailable", status_code=502)
+            # login-desktop answered but could not produce a page: that is the
+            # upstream (Douyin / network) side, not the login service itself.
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "category": "douyin_unreachable",
+                    "message": "无法访问抖音（网络或代理异常），请检查服务器网络后点击“刷新二维码”重试。",
+                },
+                status_code=502,
+                headers={"Cache-Control": "no-store"},
+            )
         except (urllib.error.URLError, TimeoutError):
-            return PlainTextResponse("login QR service is unavailable", status_code=502)
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "category": "service_unavailable",
+                    "message": "登录桌面服务暂时不可用，请稍后点击“刷新二维码”重试。",
+                },
+                status_code=502,
+                headers={"Cache-Control": "no-store"},
+            )
 
     def _header_value(headers, name):
         """Read a response header case-insensitively (HTTP header names are)."""

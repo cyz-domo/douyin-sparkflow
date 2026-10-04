@@ -555,6 +555,9 @@
   let qrPollStartedAt = 0;
   let lastPromotedTicket = "";
   let qrNotReadyAttempts = 0;
+  // About 25 seconds at the default 3-second pacing; the live page usually
+  // needs two or three not-ready polls, so a smaller cap stops too early.
+  const QR_NOT_READY_LIMIT = 8;
   let recoveringLease = false;
   let recoverAttempts = 0;
   let acquiringWorkspace = false;
@@ -581,7 +584,7 @@
     });
   };
 
-  const refreshLoginQr = async (delay = 0, retries = 400) => {
+  const refreshLoginQr = async (delay = 0, retries = 40) => {
     if (!qrImage || workspace.state !== "active" || !workspace.active) return;
     window.clearTimeout(qrRefreshTimer);
     qrRefreshTimer = window.setTimeout(async () => {
@@ -621,7 +624,7 @@
           // operator may be scanning in the noVNC frame, because the page lock
           // is global.
           qrNotReadyAttempts += 1;
-          if (qrNotReadyAttempts >= 4) {
+          if (qrNotReadyAttempts >= QR_NOT_READY_LIMIT) {
             if (qrStatus) {
               qrStatus.textContent = (data.message || "浏览器仍未生成二维码") + " 请点击“刷新二维码”重试，或稍后再试。";
             }
@@ -646,9 +649,9 @@
           const data = await response.json().catch(() => ({}));
           // Distinguish "cannot reach Douyin" from "the login service is down";
           // the old copy blamed the login desktop for every upstream failure.
-          const upstream = /douyin|network|proxy|timeout|超时|网络/i.test(
-            String(data.message || data.error || ""),
-          );
+          const upstream =
+            data.category === "douyin_unreachable" ||
+            /douyin|network|proxy|timeout|超时|网络/i.test(String(data.message || data.error || ""));
           if (qrStatus) {
             qrStatus.textContent =
               data.message ||

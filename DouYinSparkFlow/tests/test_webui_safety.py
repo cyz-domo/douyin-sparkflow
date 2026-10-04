@@ -427,6 +427,35 @@ class WebUiSafetyTests(unittest.TestCase):
         self.assertEqual("no-store, max-age=0", response.headers["cache-control"])
         self.assertEqual(b"fake-png", response.content)
 
+    def test_login_qr_upstream_failures_are_classified(self):
+        # The frontend can only show "Douyin unreachable" vs "service down" if
+        # the 502 carries a machine-readable reason instead of plain text.
+        client = TestClient(app_module.app)
+        http_error = app_module.urllib.error.HTTPError(
+            "http://login-desktop/qr", 500, "boom", {}, None
+        )
+        cases = (
+            (http_error, "douyin_unreachable"),
+            (app_module.urllib.error.URLError("refused"), "service_unavailable"),
+        )
+        for error, category in cases:
+            with self.subTest(category=category), (
+                patch.object(app_module, "current_user", return_value="admin")
+            ), patch.object(
+                app_module,
+                "current_principal",
+                return_value={"username": "admin", "role": "admin", "account_refs": [], "session_id": "session-1"},
+            ), patch.object(
+                app_module, "get_login_lock", return_value={"username": "admin", "session_id": ""}
+            ), patch.object(app_module, "owns_login_lock", return_value=True), patch.object(
+                app_module.urllib.request, "urlopen", side_effect=error
+            ):
+                response = client.get("/login-desktop/qr")
+            self.assertEqual(502, response.status_code)
+            payload = response.json()
+            self.assertEqual(category, payload["category"])
+            self.assertTrue(payload["message"])
+
     def test_login_workspace_contains_mobile_qr_controls(self):
         page = (Path(app_module.TEMPLATES_DIR) / "login_workspace.html").read_text(encoding="utf-8")
         self.assertIn("data-login-qr", page)
@@ -494,7 +523,9 @@ class WebUiSafetyTests(unittest.TestCase):
         # operator; it must not keep POSTing /qr/refresh, because every refresh
         # reloads the shared Douyin login page under the operator's cursor.
         self.assertIn("qrNotReadyAttempts", script)
-        self.assertIn("qrNotReadyAttempts >= 4", script)
+        self.assertIn("const QR_NOT_READY_LIMIT = 8;", script)
+        self.assertIn("qrNotReadyAttempts >= QR_NOT_READY_LIMIT", script)
+        self.assertIn("const refreshLoginQr = async (delay = 0, retries = 40) => {", script)
         self.assertIn('setQrButtons("已停止，点此重试", { stopped: true })', script)
         self.assertNotIn("qrAutoRefreshes", script)
         auto_calls = [line for line in script.splitlines() if "requestQrRefresh(" in line and "await requestQrRefresh()" not in line]
