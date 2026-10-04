@@ -2349,7 +2349,23 @@ def create_app():
                 status_code=502,
                 headers={"Cache-Control": "no-store"},
             )
-        except (urllib.error.URLError, TimeoutError):
+        except (urllib.error.URLError, TimeoutError) as exc:
+            reason = getattr(exc, "reason", exc)
+            if isinstance(exc, TimeoutError) or isinstance(reason, TimeoutError):
+                # login-desktop is reachable but its single page lock is held
+                # (status checks, page load); that is "busy", worth retrying,
+                # not "the service is down".
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "state": "busy",
+                        "category": "page_busy",
+                        "message": "登录页正在加载或处理其他请求",
+                        "retry_after": 3,
+                    },
+                    status_code=503,
+                    headers={"Cache-Control": "no-store", "Retry-After": "3"},
+                )
             return JSONResponse(
                 {
                     "ok": False,

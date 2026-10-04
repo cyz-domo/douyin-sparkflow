@@ -435,10 +435,13 @@ class WebUiSafetyTests(unittest.TestCase):
             "http://login-desktop/qr", 500, "boom", {}, None
         )
         cases = (
-            (http_error, "douyin_unreachable"),
-            (app_module.urllib.error.URLError("refused"), "service_unavailable"),
+            (http_error, 502, "douyin_unreachable"),
+            (app_module.urllib.error.URLError("refused"), 502, "service_unavailable"),
+            # A slow page holding the lock is "busy" and must stay retryable.
+            (TimeoutError("timed out"), 503, "page_busy"),
+            (app_module.urllib.error.URLError(TimeoutError("timed out")), 503, "page_busy"),
         )
-        for error, category in cases:
+        for error, status, category in cases:
             with self.subTest(category=category), (
                 patch.object(app_module, "current_user", return_value="admin")
             ), patch.object(
@@ -451,7 +454,7 @@ class WebUiSafetyTests(unittest.TestCase):
                 app_module.urllib.request, "urlopen", side_effect=error
             ):
                 response = client.get("/login-desktop/qr")
-            self.assertEqual(502, response.status_code)
+            self.assertEqual(status, response.status_code)
             payload = response.json()
             self.assertEqual(category, payload["category"])
             self.assertTrue(payload["message"])
