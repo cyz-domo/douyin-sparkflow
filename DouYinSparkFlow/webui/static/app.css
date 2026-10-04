@@ -93,7 +93,9 @@ small { font-size: 12px; }
 .compact { font-size: 13px; }
 svg.lucide { width: 18px; height: 18px; stroke-width: 1.9; flex: none; }
 i[data-lucide] { display: inline-block; width: 18px; height: 18px; flex: none; }
-:focus-visible { outline: none; box-shadow: var(--focus); border-radius: 10px; }
+/* Outline, not box-shadow: buttons and the active nav item carry their own shadows. */
+:focus-visible { outline: 2px solid var(--flame); outline-offset: 2px; }
+input:focus-visible, select:focus-visible, textarea:focus-visible { outline: none; }
 ::selection { background: color-mix(in srgb, var(--flame) 25%, transparent); }
 
 /* ---------- shell ---------- */

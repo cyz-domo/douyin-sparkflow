@@ -68,7 +68,7 @@ def _snapshot():
         "friend_index_count": 0,
     }
     return {
-        "send_console": {"summary": summary, "accounts": [row], "nowDisplay": "2026-10-03 14:20"},
+        "send_console": {"summary": summary, "accounts": [row], "nowDisplay": "10-03 14:20"},
         "task_lock": {"running": False, "stale": False, "ageSeconds": 0},
         "schedule": {"label": "10:00-18:00/20m", "nextTriggerDisplay": "10-03 14:40"},
         "daily_schedule": "10:00-18:00/20m",
@@ -214,6 +214,23 @@ class RedesignedPagesTests(unittest.TestCase):
 
     def test_unused_stylesheet_is_gone(self):
         self.assertFalse((Path(app_module.STATIC_DIR) / "styles.css").exists())
+
+    def test_timeline_marks_the_current_hour(self):
+        # nowDisplay is "%m-%d %H:%M" in ops.py; the hour must still be found.
+        self._as(ADMIN)
+        with patch.dict(app_module.templates.env.globals,
+                        {"schedule_window_state": lambda: {"enabled": True, "startHour": 10, "endHour": 18}}):
+            page = self._get("/").text
+        self.assertIn('<span class="now" title="14:00">', page)
+        self.assertIn('<span class="done" title="13:00">', page)
+        self.assertIn('<span class="" title="15:00">', page)
+
+    def test_focus_ring_is_not_hidden_by_component_shadows(self):
+        css = (Path(app_module.STATIC_DIR) / "app.css").read_text(encoding="utf-8")
+        rule = css[css.index(":focus-visible {"):]
+        rule = rule[: rule.index("}")]
+        self.assertIn("outline: 2px solid var(--flame)", rule)
+        self.assertNotIn("box-shadow", rule)
 
 
 if __name__ == "__main__":

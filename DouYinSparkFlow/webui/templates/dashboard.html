@@ -192,7 +192,8 @@
 
   {% set window_state = schedule_window_state() %}
   {% set now_text = ops.send_console.nowDisplay or "" %}
-  {% set now_hour = now_text[11:13]|int if now_text[11:13]|length == 2 else -1 %}
+  {# nowDisplay ends with "HH:MM" whether or not it carries the year #}
+  {% set now_hour = now_text[-5:-3]|int if now_text[-3:-2] == ":" else -1 %}
   {% set service_rows = (ops.containers or [])|selectattr("Names", "in", ["douyin-web", "douyin-scheduler", "login-desktop", "mihomo"])|list %}
   <div class="grid-2" style="margin-top: 16px">
     <div class="card">
