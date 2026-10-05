@@ -164,6 +164,9 @@
         <span class="account-name">
           <strong>{{ row.username }}</strong>
           <small>
+            {% if row.login_verification_state == "verifying" %}登录态验证中 ·
+            {% elif row.login_verification_state == "unverified" %}登录态未能验证 ·
+            {% endif %}
             {% if row.state == "paused" %}账号已暂停
             {% elif row.state == "attention" %}有目标需要处理
             {% elif row.state == "warning" %}存在数据警告

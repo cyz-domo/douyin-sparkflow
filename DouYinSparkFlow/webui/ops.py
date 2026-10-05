@@ -1681,6 +1681,7 @@ def get_send_console_snapshot(account_refs=None):
                 "account_failure_pause_after": account_failure_pause_after,
                 "state": account_state,
                 "account_health": account_health,
+                "login_verification_state": str((account.get("login_verification") or {}).get("state") or ""),
                 "attention_count": attention_count,
                 "pending_count": pending_count,
                 "last_confirmed_at": last_confirmed_at,

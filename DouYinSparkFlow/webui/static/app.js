@@ -987,7 +987,7 @@
     const startedAt = Date.now();
     const render = () => {
       const seconds = Math.round((Date.now() - startedAt) / 1000);
-      setStatus(`正在保存登录账号：读取登录态并验证…已等待 ${seconds} 秒（通常 10–30 秒，请不要重复点击）`, "warning");
+      setStatus(`正在保存登录账号…已等待 ${seconds} 秒（通常几秒，请不要重复点击）`, "warning");
     };
     render();
     savingTimer = window.setInterval(render, 1000);
@@ -1056,8 +1056,11 @@
         }
         // A login save starts a friend refresh; when it could not start, say why
         // instead of leaving the operator waiting for a list that never updates.
+        // The login state is re-checked after the save, in the background.
         const refreshNote =
-          data.friend_refresh === "started"
+          data.verification === "pending"
+            ? "，正在后台验证登录态并刷新好友列表（账号页会显示“登录态验证中”）"
+            : data.friend_refresh === "started"
             ? ""
             : data.friend_refresh === "busy"
               ? "（发送任务正在运行，好友列表稍后会自动刷新）"
@@ -1066,7 +1069,7 @@
                 : "（好友列表未自动刷新，可手动点刷新）";
         setStatus(
           `已保存登录账号：${data.account?.username || ""}${refreshNote}`,
-          data.friend_refresh === "started" ? "success" : "warning",
+          data.verification === "pending" || data.friend_refresh === "started" ? "success" : "warning",
         );
         closeFrame();
         window.setTimeout(() => window.location.reload(), 800);

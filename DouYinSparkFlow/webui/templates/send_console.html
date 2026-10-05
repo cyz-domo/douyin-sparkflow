@@ -152,6 +152,8 @@
             {% if exception_count %}<span class="status-chip danger">需处理 <b data-account-attention>{{ exception_count }}</b></span>{% endif %}
             {% if waiting_targets|length %}<span class="status-chip warning">待发送 <b data-account-pending>{{ waiting_targets|length }}</b></span>{% endif %}
             {% if account.account_paused %}<span class="status-chip danger">账号暂停</span>{% endif %}
+            {% if account.login_verification_state == "verifying" %}<span class="status-chip">登录态验证中</span>
+            {% elif account.login_verification_state == "unverified" %}<span class="status-chip warning">登录态未能验证</span>{% endif %}
           </span>
           <i class="fold-chevron" data-lucide="chevron-down"></i>
         </summary>

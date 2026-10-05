@@ -469,6 +469,12 @@ async def _run_websocket_relays(*coroutines):
 
 
 _FRIEND_REFRESH_TIMEOUT_SECONDS = 300
+# Background login verification (D12): poll for a free browser, give up
+# waiting after two hours, bound one check, and wait a little after a restart.
+LOGIN_VERIFICATION_IDLE_POLL_SECONDS = 15
+LOGIN_VERIFICATION_MAX_WAIT_SECONDS = 2 * 3600
+LOGIN_VERIFICATION_TIMEOUT_SECONDS = 300
+LOGIN_VERIFICATION_RESTART_DELAY_SECONDS = 30
 _friend_refresh_active = set()
 
 
@@ -511,6 +517,55 @@ HEALTH_CLEARING_KEYS = (
 )
 
 
+def write_login_verification(account_ref, token, outcome, *, category="", reason=""):
+    """Record a background login check on the account it was started for.
+
+    outcome is "verified", "login_required" or "unverified". The token ties the
+    result to the save that queued it, so a newer login is never overwritten.
+    """
+    def mutate(accounts):
+        target = account_by_ref(accounts, account_ref)
+        current = dict((target or {}).get("login_verification") or {})
+        if not target or not token or current.get("token") != token:
+            # Deleted meanwhile, or a newer login replaced this one.
+            return None, False
+        finished_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        if outcome == "verified":
+            for key in HEALTH_CLEARING_KEYS:
+                target.pop(key, None)
+            target.pop("login_verification", None)
+        elif outcome == "login_required":
+            target["login_required"] = True
+            health = dict(target.get("account_health") or {})
+            health.update(
+                {
+                    "healthy": False,
+                    "category": category or CATEGORY_LOGIN_REQUIRED,
+                    "reason": reason or "登录态已失效，需要重新登录",
+                }
+            )
+            target["account_health"] = health
+            target["login_verification"] = {
+                "state": "login_required",
+                "token": token,
+                "finishedAt": finished_at,
+                "reason": reason,
+            }
+        else:
+            # Not confirmed either way (network or page): shown on the
+            # account, but sending is not paused for it.
+            target["login_verification"] = {
+                "state": "unverified",
+                "token": token,
+                "finishedAt": finished_at,
+                "category": category,
+                "reason": reason,
+            }
+        return dict(target), True
+
+    return update_user_data(mutate, force_reload=True)
+
+
 def find_same_name_account(accounts, username):
     """Accounts sharing a nickname, used to ask before adding a duplicate.
 
@@ -534,9 +589,10 @@ def save_exported_login_result(
     relogin_unique_id: str = "",
     relogin_account_ref: str = "",
     display_name: str = "",
-    is_healthy: bool = True,
+    is_healthy: bool | None = True,
     verification_reason: str = "",
     verification_category: str = "",
+    verification_token: str = "",
 ) -> tuple[dict, str]:
     unique_id = normalize_unique_id(login_result.get("unique_id"))
     username = str(display_name or login_result.get("username") or "").strip()
@@ -547,7 +603,20 @@ def save_exported_login_result(
         username = unique_id
 
     def apply_health(account):
-        """Clear login failure markers only for a verified-usable login state."""
+        """Record what is known about this login's usability on the account."""
+        if is_healthy is None:
+            # Saved before the login state was re-checked in a second browser:
+            # the background verifier decides. Until then the account is not
+            # paused, and the token lets a newer login supersede the check.
+            for key in HEALTH_CLEARING_KEYS:
+                account.pop(key, None)
+            account["login_verification"] = {
+                "state": "verifying",
+                "token": verification_token,
+                "startedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            }
+            return
+        account.pop("login_verification", None)
         if is_healthy:
             for key in HEALTH_CLEARING_KEYS:
                 account.pop(key, None)
@@ -805,6 +874,10 @@ def create_app():
         if result.returncode != 0:
             logger.warning("Failed to synchronize the configured daily schedule: %s", result.stderr)
         watchdog = asyncio.create_task(login_workspace_watchdog())
+        try:
+            _requeue_pending_login_verifications()
+        except Exception:
+            logger.warning("Could not requeue pending login verifications", exc_info=True)
         try:
             yield
         finally:
@@ -1419,6 +1492,101 @@ def create_app():
             _run_friend_refresh_job(normalized_id, dict(account), str(username or ""))
         )
         return "started"
+
+    # A saved login is verified here, one account at a time: each check drives
+    # a browser, and the two-core host shares it with the login browser and the
+    # send runs. The check waits until neither of those is running.
+    login_verification_lock = asyncio.Lock()
+    login_verification_tasks = set()
+
+    async def _wait_until_browser_is_free(deadline):
+        loop = asyncio.get_running_loop()
+        while loop.time() < deadline:
+            if not task_run_lock_status().get("running") and not get_login_lock():
+                return True
+            await asyncio.sleep(LOGIN_VERIFICATION_IDLE_POLL_SECONDS)
+        return False
+
+    async def _verify_saved_login(account_ref, token, *, delay=0):
+        loop = asyncio.get_running_loop()
+        if delay:
+            await asyncio.sleep(delay)
+        deadline = loop.time() + LOGIN_VERIFICATION_MAX_WAIT_SECONDS
+        async with login_verification_lock:
+            if not await _wait_until_browser_is_free(deadline):
+                await asyncio.to_thread(
+                    write_login_verification,
+                    account_ref,
+                    token,
+                    "unverified",
+                    category="busy",
+                    reason="长时间没有空闲的浏览器可用于验证",
+                )
+                return
+            account = account_by_ref(get_userData(force_reload=True), account_ref)
+            if not account or (account.get("login_verification") or {}).get("token") != token:
+                return
+            try:
+                verified, reason, _identity, category = await asyncio.wait_for(
+                    verify_login_result(account, relogin_account_ref=account_ref),
+                    timeout=LOGIN_VERIFICATION_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                verified, reason, category = False, "验证登录态超时", CATEGORY_NETWORK_UNAVAILABLE
+            if verified:
+                outcome = "verified"
+            elif category in streak_state.LOGIN_FAILURE_CATEGORIES:
+                outcome = "login_required"
+            else:
+                outcome = "unverified"
+            logger.info(
+                "Background login verification: ref=%s outcome=%s category=%s",
+                account_ref,
+                outcome,
+                category or "",
+            )
+            saved = await asyncio.to_thread(
+                write_login_verification,
+                account_ref,
+                token,
+                outcome,
+                category=category or "",
+                reason=reason or "",
+            )
+            if outcome != "verified" or not saved:
+                return
+            # The save used to start this refresh while the saver still held the
+            # login workspace, so it never ran; here the browser is free.
+            normalized_id = normalize_unique_id(saved.get("unique_id"))
+            if normalized_id and normalized_id not in _friend_refresh_active:
+                _friend_refresh_active.add(normalized_id)
+                friend_refresh_jobs[normalized_id] = {
+                    "state": "running",
+                    "stage": "starting",
+                    "collected": 0,
+                    "startedAt": datetime.now().isoformat(timespec="seconds"),
+                    "previousUpdatedAt": saved.get("friends_cache_updated_at", ""),
+                }
+                await _run_friend_refresh_job(normalized_id, saved, "")
+
+    def _queue_login_verification(account_ref, token, *, delay=0):
+        task = asyncio.create_task(_verify_saved_login(account_ref, token, delay=delay))
+        login_verification_tasks.add(task)
+
+        def finished(done):
+            login_verification_tasks.discard(done)
+            if not done.cancelled() and done.exception():
+                logger.error("Background login verification failed", exc_info=done.exception())
+
+        task.add_done_callback(finished)
+
+    def _requeue_pending_login_verifications():
+        """After a restart, verify again whatever was still being verified."""
+        for account in get_userData(force_reload=True):
+            check = dict(account.get("login_verification") or {})
+            ref = str(account.get("account_ref") or "")
+            if check.get("state") == "verifying" and check.get("token") and ref:
+                _queue_login_verification(ref, check["token"], delay=LOGIN_VERIFICATION_RESTART_DELAY_SECONDS)
 
     @app.post("/accounts/{unique_id}/friends/refresh/async")
     async def refresh_account_friend_list_async(request: Request, unique_id: str):
@@ -2969,11 +3137,18 @@ def create_app():
                 relogin_account_ref = existing.get("account_ref", "")
                 relogin_unique_id = existing.get("unique_id", "")
                 operation = "relogin"
-            verified, verification_reason, _identity, verification_category = await verify_login_result(
-                exported,
-                relogin_account_ref=relogin_account_ref,
-                relogin_unique_id=relogin_unique_id,
-            )
+            # Only the instant checks run here. Re-reading the login state in a
+            # second browser took minutes on this host, so it runs after the
+            # save, in the background (D12); the account shows "verifying".
+            verification_reason, verification_category = "", ""
+            try:
+                require_auth_cookies(list(exported.get("cookies") or []))
+                verified = None
+            except CookieParseError as exc:
+                verified = False
+                verification_reason = str(exc)
+                verification_category = getattr(exc, "category", "cookie_format_invalid")
+            verification_token = uuid.uuid4().hex if verified is None else ""
             account, action = save_exported_login_result(
                 exported,
                 relogin_unique_id=relogin_unique_id,
@@ -2982,20 +3157,10 @@ def create_app():
                 is_healthy=verified,
                 verification_reason=verification_reason,
                 verification_category=verification_category,
+                verification_token=verification_token,
             )
             normalized_saved = normalize_unique_id(account.get("unique_id"))
-            friend_refresh_state = (
-                _start_friend_refresh_if_free(
-                    normalized_saved, account, current.get("username", "")
-                )
-                if verified
-                else "skipped"
-            )
-            logger.info(
-                "Login save friend refresh: uid=%s state=%s",
-                normalized_saved,
-                friend_refresh_state,
-            )
+            friend_refresh_state = "queued" if verified is None else "skipped"
             # Without this trail a wrong match is invisible: a duplicate account
             # only shows up later as two same-name rows in the list.
             logger.info(
@@ -3015,10 +3180,13 @@ def create_app():
             # The account is saved; do not hold the answer until the login
             # browser is reset and reopened for whoever is queued next.
             _reset_and_promote_later()
+            if verification_token:
+                _queue_login_verification(account.get("account_ref", ""), verification_token)
             return JSONResponse({
                 "ok": True,
                 "action": action,
                 "verified": verified,
+                "verification": "pending" if verified is None else ("passed" if verified else "failed"),
                 "verification_error": verification_reason,
                 "verification_category": verification_category,
                 "friend_refresh": friend_refresh_state,

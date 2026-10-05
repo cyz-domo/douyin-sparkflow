@@ -38,6 +38,10 @@
         {% if duplicate_count > 1 %}
         <span class="pill warning" title="同名账号通常来自重复保存登录态，建议确认后合并或删除多余的记录">同名 {{ duplicate_count }} 个</span>
         {% endif %}
+        {% set check = (account.login_verification or {}).get("state", "") %}
+        {% if check == "verifying" %}<span class="pill" title="保存后正在后台验证登录态并刷新好友列表">登录态验证中</span>
+        {% elif check == "unverified" %}<span class="pill warning" title="{{ (account.login_verification or {}).get('reason', '') }}；定时发送不受影响">登录态未能验证</span>
+        {% elif check == "login_required" %}<span class="pill danger">需重新登录</span>{% endif %}
         <span class="pill {% if enabled %}success{% else %}warning{% endif %}">{% if enabled %}已启用{% else %}已停用{% endif %}</span>
       </span>
       <i class="fold-chevron" data-lucide="chevron-down"></i>
