@@ -161,6 +161,17 @@ class SaveRouteSourceTests(unittest.TestCase):
 
 
 class VerificationShownOnPagesTests(unittest.TestCase):
+    def test_a_failed_load_is_not_a_logout(self):
+        from core import friends
+
+        class Page:
+            def __init__(self, url):
+                self.url = url
+
+        self.assertFalse(friends._left_creator_host(Page("chrome-error://chromewebdata/")))
+        self.assertFalse(friends._left_creator_host(Page("about:blank")))
+        self.assertTrue(friends._left_creator_host(Page("https://www.douyin.com/login")))
+        self.assertFalse(friends._left_creator_host(Page("https://creator.douyin.com/creator-micro/home")))
     def test_pages_name_the_verification_state(self):
         templates = Path(app_module.TEMPLATES_DIR)
         accounts = (templates / "accounts.html").read_text(encoding="utf-8")

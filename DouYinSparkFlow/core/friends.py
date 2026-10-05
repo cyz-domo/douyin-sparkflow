@@ -641,6 +641,10 @@ def _left_creator_host(page):
         return False
     if not current_url:
         return False
+    # A failed load leaves Chromium on its own error or blank page; that is a
+    # network problem, not a redirect to the login page.
+    if current_url.startswith(("chrome-error://", "about:")):
+        return False
     return "creator.douyin.com" not in current_url
 
 
