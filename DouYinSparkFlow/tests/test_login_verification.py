@@ -72,6 +72,19 @@ class SaveFirstVerifyLaterTests(unittest.TestCase):
         self.assertEqual("1001", saved["unique_id"])
         self.assertTrue(streak_state.preflight_account(store.accounts[0])["healthy"])
 
+    def test_a_passed_check_keeps_newer_problems(self):
+        # A relogin into a different Douyin id, or a real send failure written
+        # after the save, must survive the background check passing.
+        failure = {"category": "login_required", "reason": "发送时登录失效"}
+        store = FakeStore([dict(ACCOUNT, login_verification={"state": "verifying", "token": "t1"},
+                                identity_mismatch={"expected": "1001", "actual": "2002"},
+                                account_failure=failure)])
+        self._write(store, "acc-1", "t1", "verified")
+        account = store.accounts[0]
+        self.assertNotIn("login_verification", account)
+        self.assertEqual("2002", account["identity_mismatch"]["actual"])
+        self.assertEqual(failure, account["account_failure"])
+
     def test_a_dead_login_pauses_the_account(self):
         store = FakeStore([dict(ACCOUNT, login_verification={"state": "verifying", "token": "t1"})])
         self._write(store, "acc-1", "t1", "login_required", category="login_required", reason="登录已失效")
@@ -119,6 +132,17 @@ class SaveRouteSourceTests(unittest.TestCase):
     def test_checks_run_one_at_a_time_when_the_browser_is_free(self):
         body = self.source[self.source.index("async def _verify_saved_login"):self.source.index("def _queue_login_verification")]
         self.assertIn("async with login_verification_lock:", body)
+        # The wait limit starts on this account's turn, not when it was queued.
+        self.assertLess(body.index("async with login_verification_lock:"),
+                        body.index("deadline = loop.time() + LOGIN_VERIFICATION_MAX_WAIT_SECONDS"))
+        # Only a page that shows the login is gone may pause the account (Q4):
+        # timeouts and other errors are "unverified".
+        self.assertNotIn("verify_login_result(", body)
+        self.assertIn("verify_account_session(account, auth_only=True)", body)
+        login_branch = body[body.index("except FriendRefreshError as exc:"):body.index("except asyncio.TimeoutError:")]
+        self.assertIn("streak_state.LOGIN_FAILURE_CATEGORIES", login_branch)
+        rest = body[body.index("except asyncio.TimeoutError:"):body.index("logger.info(")]
+        self.assertNotIn('"login_required"', rest)
         free = self.source[self.source.index("async def _wait_until_browser_is_free"):]
         free = free[: free.index("return False")]
         self.assertIn('task_run_lock_status().get("running")', free)

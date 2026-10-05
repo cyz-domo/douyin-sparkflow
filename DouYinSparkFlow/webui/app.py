@@ -531,8 +531,9 @@ def write_login_verification(account_ref, token, outcome, *, category="", reason
             return None, False
         finished_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         if outcome == "verified":
-            for key in HEALTH_CLEARING_KEYS:
-                target.pop(key, None)
+            # Only lift this check's own marker. The save already cleared the old
+            # health flags; anything written since (an identity mismatch, a real
+            # send failure today) is newer and must stay.
             target.pop("login_verification", None)
         elif outcome == "login_required":
             target["login_required"] = True
@@ -882,7 +883,10 @@ def create_app():
             yield
         finally:
             watchdog.cancel()
-            await asyncio.gather(watchdog, return_exceptions=True)
+            pending = [watchdog, *login_verification_tasks]
+            for task in pending[1:]:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
     secure_cookie = str(os.getenv("SPARKFLOW_SESSION_COOKIE_SECURE") or "").strip().lower() in {
         "1",
         "true",
@@ -1511,8 +1515,9 @@ def create_app():
         loop = asyncio.get_running_loop()
         if delay:
             await asyncio.sleep(delay)
-        deadline = loop.time() + LOGIN_VERIFICATION_MAX_WAIT_SECONDS
         async with login_verification_lock:
+            # Counted from this account's turn, not from when it was queued.
+            deadline = loop.time() + LOGIN_VERIFICATION_MAX_WAIT_SECONDS
             if not await _wait_until_browser_is_free(deadline):
                 await asyncio.to_thread(
                     write_login_verification,
@@ -1526,19 +1531,29 @@ def create_app():
             account = account_by_ref(get_userData(force_reload=True), account_ref)
             if not account or (account.get("login_verification") or {}).get("token") != token:
                 return
+            # Only a page that shows the login is gone pauses the account; a
+            # timeout, a browser error or an unreadable identity is "unverified"
+            # and leaves sending alone (D12/Q4).
+            reason, category = "", ""
             try:
-                verified, reason, _identity, category = await asyncio.wait_for(
-                    verify_login_result(account, relogin_account_ref=account_ref),
+                await asyncio.wait_for(
+                    verify_account_session(account, auth_only=True),
                     timeout=LOGIN_VERIFICATION_TIMEOUT_SECONDS,
                 )
-            except asyncio.TimeoutError:
-                verified, reason, category = False, "验证登录态超时", CATEGORY_NETWORK_UNAVAILABLE
-            if verified:
                 outcome = "verified"
-            elif category in streak_state.LOGIN_FAILURE_CATEGORIES:
-                outcome = "login_required"
-            else:
-                outcome = "unverified"
+            except FriendRefreshError as exc:
+                category = exc.category or CATEGORY_STRUCTURE_CHANGED
+                reason = str(exc)
+                outcome = (
+                    "login_required"
+                    if category in streak_state.LOGIN_FAILURE_CATEGORIES
+                    else "unverified"
+                )
+            except asyncio.TimeoutError:
+                category, reason, outcome = CATEGORY_NETWORK_UNAVAILABLE, "验证登录态超时", "unverified"
+            except Exception as exc:  # noqa: BLE001 - any other failure is not a verdict
+                logger.warning("Background login verification errored: %s", exc)
+                category, reason, outcome = "verification_error", f"验证时出错：{exc}", "unverified"
             logger.info(
                 "Background login verification: ref=%s outcome=%s category=%s",
                 account_ref,
@@ -1558,6 +1573,10 @@ def create_app():
             # The save used to start this refresh while the saver still held the
             # login workspace, so it never ran; here the browser is free.
             normalized_id = normalize_unique_id(saved.get("unique_id"))
+            if task_run_lock_status().get("running") or get_login_lock():
+                # The browser got busy during the check; the next manual or
+                # post-send refresh will pick the friend list up.
+                return
             if normalized_id and normalized_id not in _friend_refresh_active:
                 _friend_refresh_active.add(normalized_id)
                 friend_refresh_jobs[normalized_id] = {
