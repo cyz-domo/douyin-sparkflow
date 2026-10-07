@@ -1,18 +1,4 @@
 services:
-  proxy:
-    image: metacubex/mihomo:latest
-    container_name: mihomo
-    restart: unless-stopped
-    logging:
-      driver: json-file
-      options:
-        max-size: "20m"
-        max-file: "3"
-    ports:
-      - "${PROXY_BIND_ADDRESS:-127.0.0.1}:${PROXY_HTTP_PORT:-7890}:7890"
-      - "${PROXY_BIND_ADDRESS:-127.0.0.1}:${PROXY_CONTROLLER_PORT:-9090}:9090"
-    volumes:
-      - ./proxy/config.yaml:/root/.config/mihomo/config.yaml:ro
 
   web:
     build:
@@ -31,7 +17,6 @@ services:
     container_name: douyin-web
     restart: unless-stopped
     depends_on:
-      - proxy
       - login-desktop
     environment:
       TZ: ${TZ:-Asia/Shanghai}
@@ -59,8 +44,6 @@ services:
     container_name: login-desktop
     restart: unless-stopped
     init: true
-    depends_on:
-      - proxy
     environment:
       TZ: ${TZ:-Asia/Shanghai}
       DISPLAY: :99
@@ -70,8 +53,8 @@ services:
       LOGIN_DESKTOP_STOP_AFTER_EXPORT_SECONDS: ${LOGIN_DESKTOP_STOP_AFTER_EXPORT_SECONDS:-60}
       LOGIN_DESKTOP_STATUS_CACHE_SECONDS: ${LOGIN_DESKTOP_STATUS_CACHE_SECONDS:-15}
 
-      LOGIN_DESKTOP_PROXY_MODE: ${LOGIN_DESKTOP_PROXY_MODE:-auto}
-      LOGIN_DESKTOP_PROXY: ${LOGIN_DESKTOP_PROXY:-http://proxy:7890}
+      LOGIN_DESKTOP_PROXY_MODE: ${LOGIN_DESKTOP_PROXY_MODE:-direct}
+      LOGIN_DESKTOP_PROXY: ${LOGIN_DESKTOP_PROXY:-}
       LOGIN_DESKTOP_PREFLIGHT_TIMEOUT_SECONDS: ${LOGIN_DESKTOP_PREFLIGHT_TIMEOUT_SECONDS:-15}
       LOGIN_DESKTOP_NETWORK_CACHE_SECONDS: ${LOGIN_DESKTOP_NETWORK_CACHE_SECONDS:-30}
       LOGIN_DESKTOP_API_BIND_ADDRESS: "0.0.0.0"
@@ -99,8 +82,6 @@ services:
     image: douyin-sparkflow:local
     container_name: douyin-scheduler
     restart: unless-stopped
-    depends_on:
-      - proxy
     environment:
       TZ: ${TZ:-Asia/Shanghai}
       PYTHONUNBUFFERED: "1"
@@ -114,8 +95,6 @@ services:
   task:
     image: douyin-sparkflow:local
     container_name: douyin-task
-    depends_on:
-      - proxy
     environment:
       TZ: ${TZ:-Asia/Shanghai}
       PYTHONUNBUFFERED: "1"

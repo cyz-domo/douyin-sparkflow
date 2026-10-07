@@ -225,26 +225,8 @@ compose_up() {
   cd "$APP_ROOT"
   log "Refreshing proxy configuration"
   run_root bash "$APP_ROOT/refresh_proxy.sh"
-  log "Starting proxy container first"
-  run_root env DOCKER_BUILDKIT=1 COMPOSE_DOCKER_CLI_BUILD=1 docker compose up -d proxy
-  log "Waiting for proxy to be reachable on 127.0.0.1:7890"
-  local tries=0
-  while [ "$tries" -lt 30 ]; do
-    if curl -fsS -x http://127.0.0.1:7890 https://www.google.com -o /dev/null 2>/dev/null; then
-      log "Proxy is reachable"
-      break
-    fi
-    tries=$((tries + 1))
-    sleep 2
-  done
-  if [ "$tries" -ge 30 ]; then
-    echo "Proxy did not become reachable on 127.0.0.1:7890; the build may fail downloading external packages." >&2
-  fi
-  log "Building and starting remaining containers"
+  log "Building and starting containers"
   run_root env DOCKER_BUILDKIT=1 COMPOSE_DOCKER_CLI_BUILD=1 \
-    HTTP_PROXY_BUILD=http://127.0.0.1:7890 \
-    HTTPS_PROXY_BUILD=http://127.0.0.1:7890 \
-    ALL_PROXY_BUILD=socks5://127.0.0.1:7890 \
     docker compose up -d --build web login-desktop scheduler
 }
 

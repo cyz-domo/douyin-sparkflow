@@ -137,11 +137,12 @@ class DeploymentContractTests(unittest.TestCase):
 
     def test_sensitive_ports_bind_to_loopback_by_default(self):
         text = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-        self.assertIn("${PROXY_BIND_ADDRESS:-127.0.0.1}:${PROXY_HTTP_PORT:-7890}:7890", text)
         self.assertIn(
             "${LOGIN_DESKTOP_BIND_ADDRESS:-127.0.0.1}:${LOGIN_DESKTOP_WEB_PORT:-8788}:6080",
             text,
         )
+        # A personal exit node on this host is a ban risk, so no proxy service ships.
+        self.assertNotIn("metacubex/mihomo", text)
 
     def test_container_login_api_and_public_url_are_wired(self):
         text = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
@@ -176,20 +177,20 @@ class DeploymentContractTests(unittest.TestCase):
         for entry in ("logs/", "config.json", "usersData.json", "webui_settings.json"):
             self.assertIn(entry, dockerignore)
 
-    def test_login_desktop_uses_direct_first_network_route(self):
+    def test_login_desktop_defaults_to_direct_network_route(self):
         compose = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         env_example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
         server = (SOURCE_ROOT / "login_desktop_server.py").read_text(encoding="utf-8")
         login_block = compose.split("  login-desktop:", 1)[1].split("  scheduler:", 1)[0]
-        self.assertIn("LOGIN_DESKTOP_PROXY_MODE: ${LOGIN_DESKTOP_PROXY_MODE:-auto}", login_block)
-        self.assertIn("LOGIN_DESKTOP_PROXY: ${LOGIN_DESKTOP_PROXY:-http://proxy:7890}", login_block)
+        self.assertIn("LOGIN_DESKTOP_PROXY_MODE: ${LOGIN_DESKTOP_PROXY_MODE:-direct}", login_block)
+        self.assertIn("LOGIN_DESKTOP_PROXY: ${LOGIN_DESKTOP_PROXY:-}", login_block)
         self.assertNotIn("HTTP_PROXY: http://proxy:7890", login_block)
-        self.assertIn("LOGIN_DESKTOP_PROXY_MODE=auto", env_example)
+        self.assertIn("LOGIN_DESKTOP_PROXY_MODE=direct", env_example)
         self.assertIn('candidates.append(("direct", None))', server)
         self.assertIn('candidates.append(("proxy", LOGIN_PROXY_SERVER))', server)
         self.assertIn('"--no-proxy-server"', server)
         self.assertIn('"/preflight"', server)
-        self.assertIn('LOGIN_DESKTOP_PROXY_MODE: ${LOGIN_DESKTOP_PROXY_MODE:-auto}', login_block)
+        self.assertNotIn('LOGIN_DESKTOP_PROXY_MODE: ${LOGIN_DESKTOP_PROXY_MODE:-auto}', login_block)
         settings_page = (SOURCE_ROOT / "webui" / "templates" / "settings.html").read_text(encoding="utf-8")
         self.assertIn('name="douyin_network_mode"', settings_page)
         self.assertIn('name="douyin_proxy_url"', settings_page)

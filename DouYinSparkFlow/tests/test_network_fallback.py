@@ -24,9 +24,9 @@ class NetworkFallbackContractTests(unittest.TestCase):
         self.assertIn("get_browser(network_mode=network_mode)", tasks)
         self.assertIn("network_mode=network_mode", tasks)
 
-    def test_login_defaults_to_auto_in_compose(self):
+    def test_login_defaults_to_direct_in_compose(self):
         compose = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-        self.assertIn("LOGIN_DESKTOP_PROXY_MODE: ${LOGIN_DESKTOP_PROXY_MODE:-auto}", compose)
+        self.assertIn("LOGIN_DESKTOP_PROXY_MODE: ${LOGIN_DESKTOP_PROXY_MODE:-direct}", compose)
 
 if __name__ == "__main__":
     unittest.main()
