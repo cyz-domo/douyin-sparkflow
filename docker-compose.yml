@@ -79,6 +79,12 @@ services:
 
     ports:
       - "${LOGIN_DESKTOP_BIND_ADDRESS:-127.0.0.1}:${LOGIN_DESKTOP_WEB_PORT:-8788}:6080"
+    # Host dockerd runs with LimitNOFILE=infinity; x11vnc startup then spins in
+    # glibc's close-all-fds scan and never reaches accept(), so noVNC hangs.
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
     command: bash /app/scripts/start_login_desktop.sh
     cpus: ${LOGIN_DESKTOP_CPUS:-1.5}
     mem_limit: ${LOGIN_DESKTOP_MEMORY_LIMIT:-1200m}
