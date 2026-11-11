@@ -70,7 +70,7 @@ DEFAULT_CONFIG = {
         "enabled": True,
         "root": "/opt/douyin-sparkflow/state/browser-profiles",
         "seedCookiesWhenEmpty": True,
-        "syncStoredCookiesBeforeRun": True,
+        "syncStoredCookiesBeforeRun": False,
         "refreshStoredCookiesAfterLogin": True
     }
 }

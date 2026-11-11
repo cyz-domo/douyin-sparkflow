@@ -4529,5 +4529,54 @@ class ProtocolFailureLabelTests(unittest.TestCase):
                 self.assertIn(category, web_ops.FAILURE_CATEGORY_LABELS)
 
 
+class KickedAccountStateTests(unittest.TestCase):
+    """A server-side KICK is a revoked session, not a same-day hiccup."""
+
+    def test_kick_is_detected_in_the_server_receipt(self):
+        self.assertEqual("KICK", tasks._kick_receipt_reason({"decision": "KICK"}))
+        self.assertTrue(tasks._kick_receipt_reason({"payload": {"decision": "KICK"}}))
+        self.assertTrue(tasks._kick_receipt_reason({"body": "decision=KICK"}))
+        self.assertEqual("", tasks._kick_receipt_reason({"decision": "PASS"}))
+        self.assertEqual("", tasks._kick_receipt_reason(None))
+
+    def test_kick_marks_the_account_login_required_so_tomorrow_does_not_retry(self):
+        user = {"username": "demo", "unique_id": "1", "targets": ["Alice"]}
+        accounts = [user]
+
+        def fake_update(mutator, **kwargs):
+            result = mutator(accounts)
+            changed = True
+            if isinstance(result, tuple) and len(result) == 2:
+                result, changed = result
+            if kwargs.get("return_changed"):
+                return result, changed
+            return result
+
+        attempted_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with patch.object(tasks, "update_user_data", side_effect=fake_update):
+            tasks._persist_account_send_failure(
+                user,
+                "login_required",
+                "decision=KICK",
+                attempted_at,
+                ["Alice"],
+                mark_login_required=True,
+            )
+
+        self.assertTrue(user.get("login_required"))
+        self.assertFalse(user["account_health"]["healthy"])
+        self.assertEqual("login_required", user["account_health"]["category"])
+        self.assertEqual("login_required", user["account_failure"]["category"])
+        self.assertNotIn("Alice", user.get("failure_queue") or {})
+
+        # The same-day failure alone would stop blocking tomorrow; the
+        # persistent flag must keep the preflight from retrying a revoked
+        # session and collecting another KICK.
+        tomorrow = datetime.now(timezone(timedelta(hours=8))) + timedelta(days=1)
+        preflight = streak_state.preflight_account(user, tomorrow)
+        self.assertFalse(preflight["healthy"])
+        self.assertEqual("login_required", preflight["category"])
+
+
 if __name__ == "__main__":
     unittest.main()

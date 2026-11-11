@@ -510,7 +510,10 @@ class WebUiSafetyTests(unittest.TestCase):
     def test_save_and_close_do_not_wait_for_the_next_workspace(self):
         source = Path(app_module.__file__).read_text(encoding="utf-8")
         save = source[source.index('@app.post("/login-desktop/save")'):]
-        self.assertIn('await asyncio.to_thread(call_login_desktop, "/export"', save)
+        flat_save = " ".join(save.split())
+        # The /export call is wrapped across lines in webui/app.py, so compare
+        # the source with whitespace collapsed.
+        self.assertIn('await asyncio.to_thread( call_login_desktop, "/export"', flat_save)
         self.assertIn("_reset_and_promote_later()", save)
         self.assertNotIn("await _reset_and_promote()", save)
         close = source[source.index('@app.post("/login-desktop/close")'):source.index('@app.post("/login-desktop/release")')]

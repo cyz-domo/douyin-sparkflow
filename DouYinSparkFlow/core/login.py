@@ -39,6 +39,10 @@ XPATHS = {
 IDENTITY_TRAILING_BUDGET_MS = 8000
 IDENTITY_POLL_SECONDS = 0.5
 DOUYIN_ID_MARKERS = ("抖音号：", "抖音号:")
+# The SPA re-nests the card on every release while the 抖音号 text node keeps the
+# same marker, so the text is the durable read and the positional xpath below is
+# only the fast path.
+DOUYIN_ID_BLOCK_XPATH = 'xpath=//*[contains(text(), "抖音号")]/..'
 NICKNAME_FALLBACK_SELECTORS = (
     f'xpath={_CONTAINER_XPATH}//*[contains(@class, "name-")]',
 )
@@ -111,6 +115,10 @@ async def _wait_for_identity_card(page, timeout_ms):
                 return
         except Exception:
             pass
+        # The card's own container path is positional and breaks on most creator
+        # releases; the rendered 抖音号 text means the card is on screen.
+        if await _first_visible_text(page, (DOUYIN_ID_BLOCK_XPATH,)):
+            return
         # A visible login form is a conclusive answer: waiting out the whole
         # budget on a page that is asking for a QR scan only delays it.
         if await _login_form_visible(page):
@@ -144,6 +152,19 @@ async def wait_for_logged_in_identity(page, timeout_ms=300000):
 
     unique_id_text = await _wait_for_visible_text(page, (XPATHS["unique_id"],), trailing_ms)
     unique_id = normalize_unique_id(unique_id_text)
+    id_block_text = ""
+    if not unique_id:
+        id_block_text = await _wait_for_visible_text(
+            page, (DOUYIN_ID_BLOCK_XPATH,), trailing_ms
+        )
+        _nickname, handle = identity_from_card_text(id_block_text)
+        unique_id = normalize_unique_id(handle)
+        if unique_id:
+            logger.warning(
+                "Identity card xpath missed; read the Douyin id %r from the page "
+                "text instead",
+                unique_id,
+            )
     if not unique_id:
         raise RuntimeError(IDENTITY_UNREADABLE_MESSAGE)
 
@@ -153,7 +174,15 @@ async def wait_for_logged_in_identity(page, timeout_ms=300000):
         trailing_ms,
     )
     if not nickname:
-        nickname, _handle = identity_from_card_text(await _first_visible_text(page, (READY_SELECTOR,)))
+        if not id_block_text:
+            id_block_text = await _wait_for_visible_text(
+                page, (DOUYIN_ID_BLOCK_XPATH,), trailing_ms
+            )
+        nickname, _handle = identity_from_card_text(id_block_text)
+    if not nickname:
+        nickname, _handle = identity_from_card_text(
+            await _first_visible_text(page, (READY_SELECTOR,))
+        )
     if not nickname:
         raise RuntimeError(IDENTITY_UNREADABLE_MESSAGE)
     return unique_id, nickname

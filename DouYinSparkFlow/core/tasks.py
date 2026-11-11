@@ -147,7 +147,10 @@ def _normalize_persistent_profile_config(active_config):
             or "/opt/douyin-sparkflow/state/browser-profiles"
         ),
         "seedCookiesWhenEmpty": bool(raw.get("seedCookiesWhenEmpty", True)),
-        "syncStoredCookiesBeforeRun": bool(raw.get("syncStoredCookiesBeforeRun", True)),
+        # Keep the profile's own cookies by default: the profile carries the
+        # device identity Douyin trusts, while usersData.json cookies go stale
+        # (and re-seeding them on every run can resurrect a revoked session).
+        "syncStoredCookiesBeforeRun": bool(raw.get("syncStoredCookiesBeforeRun", False)),
         "refreshStoredCookiesAfterLogin": bool(raw.get("refreshStoredCookiesAfterLogin", True)),
     }
 
@@ -678,6 +681,12 @@ async def start_im_send_observer(page, account_name, target_name):
             )
             receipt = {"call": kind, "httpStatus": status, "ok": receipt_ok, "jsonParsed": isinstance(data, dict), "logid": _trim(logid, 120), "url": _safe_url(url)}
             receipt.update(_receipt_body_meta(data, body_text))
+            # A KICK body can look like a successful JSON response, so it must
+            # override `ok` instead of only decorating the receipt.
+            kick_decision = _receipt_kick_decision(data)
+            if kick_decision:
+                receipt["decision"] = kick_decision
+                receipt["ok"] = False
             if json_ok is not None:
                 receipt["jsonOk"] = bool(json_ok)
             if not receipt["ok"]:
@@ -963,6 +972,19 @@ async def find_visible_spark_message_candidate(page, chat_input=None, candidates
     return ""
 
 
+def _receipt_kick_decision(data):
+    """Return a KICK decision carried by a send response body, if any."""
+    if not isinstance(data, dict):
+        return ""
+    for candidate in (data, data.get("data"), data.get("extra")):
+        if not isinstance(candidate, dict):
+            continue
+        decision = str(candidate.get("decision") or "").strip()
+        if decision.upper() == "KICK":
+            return decision
+    return ""
+
+
 def _json_body_success(data):
     if not isinstance(data, dict):
         return None
@@ -1073,6 +1095,31 @@ class FriendListUnavailableError(RuntimeError):
 
 class FriendListIncompleteError(RuntimeError):
     pass
+
+
+class AccountKickedError(RuntimeError):
+    """Douyin answered the send request with decision=KICK (session revoked)."""
+
+
+def _kick_receipt_reason(send_receipt):
+    """Return the KICK reason when the server receipt carries a KICK decision."""
+    if not isinstance(send_receipt, dict):
+        return ""
+    decision = str(send_receipt.get("decision") or "").strip().upper()
+    reason = str(send_receipt.get("reason") or "").strip()
+    if decision == "KICK":
+        return reason or decision
+    if "KICK" in reason.upper():
+        return reason
+    for key in ("payload", "body", "response"):
+        value = send_receipt.get(key)
+        if isinstance(value, str) and "KICK" in value.upper():
+            return value[:200]
+        if isinstance(value, dict):
+            nested = " ".join(str(item) for item in value.values())
+            if "KICK" in nested.upper():
+                return nested[:200]
+    return ""
 
 
 ACCOUNT_LEVEL_FAILURE_CATEGORIES = {
@@ -2346,7 +2393,15 @@ def _coerce_attempt_count(entry):
         return 0
 
 
-def _persist_account_send_failure(user, category, reason, attempted_at, affected_targets=None):
+def _persist_account_send_failure(
+    user,
+    category,
+    reason,
+    attempted_at,
+    affected_targets=None,
+    *,
+    mark_login_required=False,
+):
     affected_targets = list(affected_targets or [])
 
     def mutate(accounts):
@@ -2370,6 +2425,17 @@ def _persist_account_send_failure(user, category, reason, attempted_at, affected
             matched["failure_queue"] = failure_queue
         else:
             matched.pop("failure_queue", None)
+        if mark_login_required:
+            # The cookies still look valid to the preflight, so without this
+            # persistent flag the next day would retry the revoked session and
+            # collect another KICK. A successful login save clears the flag.
+            matched["login_required"] = True
+            matched["account_health"] = {
+                "healthy": False,
+                "category": category,
+                "reason": reason,
+                "checkedAt": attempted_at,
+            }
         matched["account_failure"] = entry
         return (dict(matched), dict(entry)), True
 
@@ -2391,6 +2457,14 @@ def _persist_account_send_failure(user, category, reason, attempted_at, affected
         user["failure_queue"] = user_queue
     else:
         user.pop("failure_queue", None)
+    if mark_login_required:
+        user["login_required"] = True
+        user["account_health"] = {
+            "healthy": False,
+            "category": category,
+            "reason": reason,
+            "checkedAt": attempted_at,
+        }
     logger.warning(
         "Paused browser sends for account %s category=%s affectedTargets=%s reason=%s",
         matched_account.get("username", "unknown"),
@@ -3487,6 +3561,15 @@ async def _do_user_task_locked(
                     )
                     await save_debug_artifacts(page, account_name, target_name, "after-send")
 
+                    kick_reason = _kick_receipt_reason(send_receipt)
+                    if kick_reason:
+                        # KICK means Douyin revoked this device's session. Retrying
+                        # (or "recovering" the send) only deepens the risk score, so
+                        # stop the whole account immediately instead of carrying on.
+                        raise AccountKickedError(
+                            f"server rejected the message with KICK ({kick_reason}); {detail}"
+                        )
+
                     if im_summary.get("enabled"):
                         if not im_summary.get("send_request_seen"):
                             raise RuntimeError(f"server send request was not observed; {detail}")
@@ -3517,6 +3600,28 @@ async def _do_user_task_locked(
                     )
                     await _sleep_with_log(interval, "Delaying next browser message", account_name)
                 except Exception as exc:
+                    if isinstance(exc, AccountKickedError):
+                        category = "login_required"
+                        reason = str(exc)
+                        affected_targets = [
+                            target_name,
+                            *[target for target in targets if target not in yielded_targets],
+                        ]
+                        attempted_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                        logger.warning(
+                            "Account %s was kicked by Douyin mid-send; stopping this account for the run: %s",
+                            account_name,
+                            reason,
+                        )
+                        _persist_account_send_failure(
+                            user,
+                            category,
+                            reason,
+                            attempted_at,
+                            affected_targets,
+                            mark_login_required=True,
+                        )
+                        return
                     sent_ok = False
                     detail = ""
                     if message:

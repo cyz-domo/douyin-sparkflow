@@ -1507,12 +1507,25 @@ def preflight_account(account, now=None):
             "category": category,
             "reason": str(failure.get("reason") or category),
         }
-    if account.get("account_identity_mismatch") or account.get("identity_mismatch"):
-        return {
-            "healthy": False,
-            "category": "account_identity_mismatch",
-            "reason": "login identity does not match the configured account",
-        }
+    identity_mismatch = account.get("account_identity_mismatch") or account.get("identity_mismatch")
+    if identity_mismatch:
+        # A mismatch recorded by the relogin flow is only actionable while the
+        # scanned identity differs from the account row. Once the row itself has
+        # been updated to the scanned unique_id (or the operator confirmed the
+        # merge), the flag is a leftover that nothing could clear: the preflight
+        # refused to run, and the failure handler only clears flags after a
+        # healthy run. Treat it as resolved so the next run clears it.
+        mismatch_resolved = False
+        if isinstance(identity_mismatch, dict):
+            expected = normalize_unique_id(identity_mismatch.get("actual"))
+            current = normalize_unique_id(account.get("unique_id"))
+            mismatch_resolved = bool(expected and current and expected == current)
+        if not mismatch_resolved:
+            return {
+                "healthy": False,
+                "category": "account_identity_mismatch",
+                "reason": "login identity does not match the configured account",
+            }
     if account.get("pending_login_verification"):
         return {
             "healthy": False,

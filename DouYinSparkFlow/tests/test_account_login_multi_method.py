@@ -631,7 +631,7 @@ class SavedLoginHealthTests(unittest.TestCase):
         self.assertNotIn("account_health", account)
         self.assertTrue(streak_state.preflight_account(account)["healthy"])
 
-    def test_relogin_identity_mismatch_is_recorded(self):
+    def test_relogin_identity_mismatch_is_recorded_and_cleared(self):
         app_module.save_exported_login_result(
             {
                 "unique_id": ACCOUNT_ID,
@@ -641,19 +641,51 @@ class SavedLoginHealthTests(unittest.TestCase):
             is_healthy=True,
         )
 
+        # The first readable card only records its value: the row id and the card
+        # id are two different identifiers for one account, so comparing them
+        # would flag every re-login as a different account.
         account, _ = app_module.save_exported_login_result(
             {
-                "unique_id": "9999999999",
-                "username": "Other",
+                "unique_id": ACCOUNT_ID,
+                "username": "Tester",
                 "cookies": [{"name": "sessionid", "value": "w", "domain": ".douyin.com", "path": "/"}],
             },
             relogin_unique_id=ACCOUNT_ID,
             is_healthy=True,
         )
+        self.assertEqual(ACCOUNT_ID, account["unique_id"])
+        self.assertEqual(ACCOUNT_ID, account["identity_card"])
+        self.assertNotIn("identity_mismatch", account)
 
-        self.assertEqual("9999999999", account["unique_id"])
+        # A scan reporting a different card is a different Douyin account. The
+        # row keeps the id that names its profile directory.
+        account, _ = app_module.save_exported_login_result(
+            {
+                "unique_id": "9999999999",
+                "username": "Other",
+                "cookies": [{"name": "sessionid", "value": "x", "domain": ".douyin.com", "path": "/"}],
+            },
+            relogin_unique_id=ACCOUNT_ID,
+            is_healthy=True,
+        )
+        self.assertEqual(ACCOUNT_ID, account["unique_id"])
         self.assertEqual(ACCOUNT_ID, account["identity_mismatch"]["expected"])
         self.assertEqual("9999999999", account["identity_mismatch"]["actual"])
+
+        # Scanning the right account clears the flag: a mismatch that only a
+        # rename could clear pauses the account forever, because preflight
+        # refuses to run and only a healthy run clears flags.
+        account, _ = app_module.save_exported_login_result(
+            {
+                "unique_id": ACCOUNT_ID,
+                "username": "Tester",
+                "cookies": [{"name": "sessionid", "value": "y", "domain": ".douyin.com", "path": "/"}],
+            },
+            relogin_unique_id=ACCOUNT_ID,
+            is_healthy=True,
+        )
+        self.assertNotIn("identity_mismatch", account)
+        self.assertTrue(streak_state.preflight_account(account)["healthy"])
 
 
 class WebCookieLoginEndpointTests(unittest.TestCase):
@@ -1132,17 +1164,19 @@ class LoginDesktopQrPayloadTests(unittest.TestCase):
         # One bounded probe (at least 3s) past the 1s wait, never the 60s hang.
         self.assertLess(time.monotonic() - started, 8)
 
-    def test_close_keeps_the_browser_cache_but_drops_the_session(self):
+    def test_close_keeps_the_device_identity_but_drops_the_session(self):
         with tempfile.TemporaryDirectory() as tmp:
             profile = Path(tmp)
             for relative in ("Default/Network/Cookies", "Default/Local Storage/leveldb/x.log",
                              "Default/IndexedDB/https_creator.douyin.com_0/x", "Default/Login Data",
+                             "Default/Sessions/000003.log",
                              "Default/Cache/Cache_Data/f_0001", "Default/Code Cache/js/abc"):
                 target = profile / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(b"x")
             with (
                 patch.object(login_desktop_server, "PROFILE_DIR", profile),
+                patch.object(login_desktop_server.manager, "_profile_export_unique_id", ""),
                 patch.object(login_desktop_server.manager, "context", None),
                 patch.object(login_desktop_server.manager, "page", None),
                 patch.object(login_desktop_server.manager, "playwright", None),
@@ -1150,10 +1184,103 @@ class LoginDesktopQrPayloadTests(unittest.TestCase):
                 response = self.client.post("/close")
 
             self.assertEqual(200, response.status_code)
-            for gone in ("Default/Network/Cookies", "Default/Local Storage", "Default/IndexedDB", "Default/Login Data"):
+            # The session must go; the device identity must stay, otherwise the
+            # next Douyin login looks like a brand-new device and gets KICKed.
+            for gone in ("Default/Network/Cookies", "Default/Login Data", "Default/Sessions"):
                 self.assertFalse((profile / gone).exists(), gone)
-            for kept in ("Default/Cache/Cache_Data/f_0001", "Default/Code Cache/js/abc"):
+            for kept in (
+                "Default/Local Storage/leveldb/x.log",
+                "Default/IndexedDB/https_creator.douyin.com_0/x",
+                "Default/Cache/Cache_Data/f_0001",
+                "Default/Code Cache/js/abc",
+            ):
                 self.assertTrue((profile / kept).exists(), kept)
+
+    def test_close_snapshots_the_login_profile_into_the_account_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = Path(tmp) / "login-profile"
+            export_root = Path(tmp) / "browser-profiles"
+            for relative, payload in (
+                ("Default/Local Storage/leveldb/device.log", b"device"),
+                ("Default/IndexedDB/https_creator.douyin.com_0/x", b"idb"),
+                ("Default/Network/Cookies", b"cookie"),
+                ("Default/Cache/Cache_Data/blob", b"cache"),
+            ):
+                target = profile / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(payload)
+            with (
+                patch.object(login_desktop_server, "PROFILE_DIR", profile),
+                patch.object(login_desktop_server, "PROFILE_EXPORT_ROOT", export_root),
+                patch.object(login_desktop_server.manager, "_profile_export_unique_id", "5913156366164"),
+                patch.object(login_desktop_server.manager, "context", None),
+                patch.object(login_desktop_server.manager, "page", None),
+                patch.object(login_desktop_server.manager, "playwright", None),
+            ):
+                response = self.client.post("/close")
+
+            self.assertEqual(200, response.status_code)
+            snapshot = export_root / "uid-5913156366164"
+            self.assertTrue((snapshot / "Default" / "Local Storage" / "leveldb" / "device.log").exists())
+            self.assertTrue((snapshot / "Default" / "IndexedDB" / "https_creator.douyin.com_0" / "x").exists())
+            self.assertTrue((snapshot / "Default" / "Network" / "Cookies").exists())
+            self.assertFalse((snapshot / "Default" / "Cache").exists())
+
+    def test_login_profile_snapshot_skips_a_profile_that_is_in_use(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "login-profile"
+            source.mkdir()
+            (source / "Preferences").write_bytes(b"x")
+            root = Path(tmp) / "browser-profiles"
+            target = root / "uid-1"
+            target.mkdir(parents=True)
+            (target / "SingletonLock").write_bytes(b"")
+
+            self.assertFalse(
+                login_desktop_server._snapshot_profile_to_account(source, root, "1")
+            )
+
+    def test_profile_dir_name_matches_the_task_profile_naming(self):
+        from core.browser import sanitize_profile_name
+        from utils.config import normalize_unique_id
+
+        root = Path("profiles")
+        for unique_id in ("5913156366164", "a.b-c_d", "user 1"):
+            with self.subTest(unique_id=unique_id):
+                expected = sanitize_profile_name(f"uid-{normalize_unique_id(unique_id)}")
+                actual = login_desktop_server._profile_dir_for_unique_id(root, unique_id)
+                self.assertIsNotNone(actual)
+                self.assertEqual(expected, actual.name)
+
+    def test_close_retries_a_skipped_snapshot_and_reports_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = Path(tmp) / "login-profile"
+            profile.mkdir()
+            (profile / "Preferences").write_bytes(b"x")
+            with (
+                patch.object(login_desktop_server, "PROFILE_DIR", profile),
+                patch.object(login_desktop_server, "PROFILE_EXPORT_ROOT", Path(tmp) / "profiles"),
+                patch.object(login_desktop_server, "PROFILE_SNAPSHOT_RETRY_SECONDS", 0),
+                patch.object(
+                    login_desktop_server, "_snapshot_profile_to_account", return_value=False
+                ) as snapshot,
+                patch.object(login_desktop_server.manager, "_profile_export_unique_id", "1"),
+                patch.object(login_desktop_server.manager, "_last_snapshot", {}),
+                patch.object(login_desktop_server.manager, "context", None),
+                patch.object(login_desktop_server.manager, "page", None),
+                patch.object(login_desktop_server.manager, "playwright", None),
+            ):
+                response = self.client.post("/close")
+
+                self.assertEqual(200, response.status_code)
+                self.assertEqual(
+                    3,
+                    snapshot.call_count,
+                    "a skipped snapshot must be retried, not silently dropped",
+                )
+                self.assertEqual("", login_desktop_server.manager._profile_export_unique_id)
+                self.assertFalse(login_desktop_server.manager._last_snapshot.get("ok"))
+                self.assertEqual(3, login_desktop_server.manager._last_snapshot.get("attempts"))
 
     def test_qr_reports_busy_when_page_lock_is_held(self):
         with patch.object(
@@ -1431,7 +1558,7 @@ class MergeDuplicateAccountTests(unittest.TestCase):
 
 
 class ReloginOverwriteTests(unittest.TestCase):
-    """Re-logging into a chosen account must overwrite it, not be refused."""
+    """Re-logging into a chosen account overwrites its session, not its name."""
 
     def test_overwrite_keeps_targets_and_ledger_and_adds_no_row(self):
         accounts = [
@@ -1462,8 +1589,10 @@ class ReloginOverwriteTests(unittest.TestCase):
                 relogin_unique_id="123",
             )
 
-        # Identity and login state are overwritten...
-        self.assertEqual("999", account["unique_id"])
+        # The session is overwritten, but the row keeps the unique_id that names
+        # its browser profile directory; the scanned card is stored beside it.
+        self.assertEqual("123", account["unique_id"])
+        self.assertEqual("999", account["identity_card"])
         self.assertEqual("New", account["username"])
         # ...while the operator's targets and send ledger survive, and no second
         # row is created for the same person.

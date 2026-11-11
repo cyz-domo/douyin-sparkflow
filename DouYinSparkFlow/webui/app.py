@@ -584,6 +584,22 @@ def find_same_name_account(accounts, username):
     ]
 
 
+def trusted_export_identity(raw_unique_id):
+    """Return an exported Douyin id, or "" when the collector invented one.
+
+    The www fallback collector cannot read an identity, so it names the account
+    "web-self-<cookie fragment>" from whichever cookie it finds first.
+    normalize_unique_id keeps only digits, which turns a passport_csrf_token
+    into something that looks exactly like a Douyin id -- and that value then
+    renames the row and points the browser profile lookup at a directory nobody
+    ever creates. A made-up id must never be allowed to name an account.
+    """
+    text = str(raw_unique_id or "").strip()
+    if not text or text.startswith("web-self-"):
+        return ""
+    return normalize_unique_id(text)
+
+
 def save_exported_login_result(
     login_result: dict,
     *,
@@ -595,11 +611,16 @@ def save_exported_login_result(
     verification_category: str = "",
     verification_token: str = "",
 ) -> tuple[dict, str]:
-    unique_id = normalize_unique_id(login_result.get("unique_id"))
+    unique_id = trusted_export_identity(login_result.get("unique_id"))
     username = str(display_name or login_result.get("username") or "").strip()
     cookies = list(login_result.get("cookies") or [])
-    if not unique_id or not cookies:
+    if not cookies:
         raise RuntimeError("Exported login result is incomplete")
+    if not unique_id and not (relogin_account_ref or relogin_unique_id):
+        raise RuntimeError(
+            "The scanned login exposed no Douyin id, so a new account cannot be "
+            "named; retry the save once the creator page has finished loading"
+        )
     if not username:
         username = unique_id
 
@@ -656,21 +677,55 @@ def save_exported_login_result(
             if not target:
                 raise RuntimeError("Target account not found for relogin")
             previous_unique_id = normalize_unique_id(target.get("unique_id"))
-            target["unique_id"] = unique_id
-            target["username"] = username
+            previous_card_id = normalize_unique_id(target.get("identity_card"))
+            # unique_id is also the browser profile directory name, and the card
+            # reports either the internal uid or the 抖音号 handle depending on
+            # which read answered, so a chosen re-login never renames the row.
+            # Renaming is what moved accounts onto stale or empty profiles.
+            effective_unique_id = previous_unique_id or unique_id
+            target["unique_id"] = effective_unique_id
+            target["username"] = username or target.get("username", "")
             target["cookies"] = cookies
             target.setdefault("enabled", True)
             apply_health(target)
-            if previous_unique_id and previous_unique_id != unique_id:
-                target["identity_mismatch"] = {
-                    "expected": previous_unique_id,
-                    "actual": unique_id,
-                    "detectedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                    "reason": "relogin exported a different Douyin account",
+            # A mismatch that is never cleared pauses the account for good:
+            # preflight refuses to run, and only a healthy run clears flags. So
+            # the card is compared against the previous card, never against the
+            # row id, and a matching scan clears the flag.
+            if not unique_id:
+                target.pop("identity_mismatch", None)
+                target["identity_read_warning"] = {
+                    "detectedAt": datetime.now(timezone.utc).isoformat(
+                        timespec="seconds"
+                    ),
+                    "reason": (
+                        "the identity card was unreadable and the fallback collector "
+                        "only produces a cookie-derived placeholder, so the account "
+                        "kept the id it already had"
+                    ),
                 }
+            else:
+                target.pop("identity_read_warning", None)
+                if not previous_card_id:
+                    target["identity_card"] = unique_id
+                    target.pop("identity_mismatch", None)
+                elif previous_card_id != unique_id:
+                    # Keep the stored card: recording the scan that did not match
+                    # would make the row's reference value the wrong account's,
+                    # and then every later scan looks like a mismatch again.
+                    target["identity_mismatch"] = {
+                        "expected": previous_card_id,
+                        "actual": unique_id,
+                        "detectedAt": datetime.now(timezone.utc).isoformat(
+                            timespec="seconds"
+                        ),
+                        "reason": "relogin exported a different Douyin account",
+                    }
+                else:
+                    target.pop("identity_mismatch", None)
             _dedupe_account_records(
                 accounts,
-                unique_id=unique_id,
+                unique_id=effective_unique_id,
                 keep_ref=target.get("account_ref", ""),
             )
             return dict(target), "updated", True
@@ -713,7 +768,7 @@ async def verify_login_result(login_result, *, relogin_account_ref="", relogin_u
     """
     cookies = list(login_result.get("cookies") or [])
     identity = {
-        "unique_id": normalize_unique_id(login_result.get("unique_id")),
+        "unique_id": trusted_export_identity(login_result.get("unique_id")),
         "username": str(login_result.get("username") or "").strip(),
     }
     try:
@@ -3063,7 +3118,15 @@ def create_app():
         try:
             # Off the event loop: exporting reads the live login page and must not
             # freeze every other request (noVNC, heartbeats) while it runs.
-            payload = await asyncio.to_thread(call_login_desktop, "/export", method="POST", payload={}, timeout=30)
+            # The export can outlive the creator identity wait and then run the
+            # www collector, so the client budget has to cover both.
+            payload = await asyncio.to_thread(
+                call_login_desktop,
+                "/export",
+                method="POST",
+                payload={"snapshot_unique_id": relogin_unique_id},
+                timeout=150,
+            )
             if not payload.get("ok"):
                 raise RuntimeError("login-desktop export did not return ok")
             exported = payload.get("result", {}) or {}

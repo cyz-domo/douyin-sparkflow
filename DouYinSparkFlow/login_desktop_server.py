@@ -2,6 +2,7 @@ import asyncio
 import hmac
 import logging
 import os
+import re
 import shutil
 import time
 import urllib.request
@@ -35,13 +36,42 @@ DEFAULT_PROFILE_DIR = (
     else Path("/data/login-profile")
 )
 PROFILE_DIR = Path(os.getenv("LOGIN_PROFILE_DIR", str(DEFAULT_PROFILE_DIR))).expanduser()
+# Where the task-side browser profiles live. The login profile is snapshotted
+# into `uid-<unique_id>` here after a successful export so the account keeps the
+# device identity that just passed Douyin's login risk check.
+DEFAULT_PROFILE_EXPORT_ROOT = (
+    Path(__file__).resolve().parents[1] / "state" / "browser-profiles"
+    if os.name == "nt"
+    else Path("/data/browser-profiles")
+)
+PROFILE_EXPORT_ROOT = Path(
+    os.getenv("LOGIN_PROFILE_EXPORT_ROOT", str(DEFAULT_PROFILE_EXPORT_ROOT))
+).expanduser()
 LOGIN_DESKTOP_MODE = str(
     os.getenv("LOGIN_DESKTOP_MODE", "native" if os.name == "nt" else "novnc")
 ).strip().lower()
 if LOGIN_DESKTOP_MODE not in {"native", "novnc"}:
     LOGIN_DESKTOP_MODE = "native" if os.name == "nt" else "novnc"
 IDLE_TIMEOUT_SECONDS = max(300, int(os.getenv("LOGIN_DESKTOP_IDLE_TIMEOUT_SECONDS", "1800")))
+# core.login documents that the creator identity card routinely needs 25-30s
+# to appear on a cold, cookie-only context. A budget below that makes every
+# export fall through to the www collector, which cannot see the real uid.
+RELOGIN_IDENTITY_CONFIRM_TIMEOUT_MS = max(
+    0, int(os.getenv("LOGIN_DESKTOP_RELOGIN_IDENTITY_CONFIRM_TIMEOUT_MS", "6000"))
+)
+
+EXPORT_IDENTITY_TIMEOUT_MS = max(
+    5000, int(os.getenv("LOGIN_DESKTOP_EXPORT_IDENTITY_TIMEOUT_MS", "40000"))
+)
 STOP_AFTER_EXPORT_SECONDS = max(0, int(os.getenv("LOGIN_DESKTOP_STOP_AFTER_EXPORT_SECONDS", "60")))
+# A task browser may briefly own the target profile while the login browser is
+# closing. Retry the snapshot instead of silently keeping the old session.
+PROFILE_SNAPSHOT_RETRY_ATTEMPTS = max(
+    1, int(os.getenv("LOGIN_PROFILE_SNAPSHOT_RETRY_ATTEMPTS", "3"))
+)
+PROFILE_SNAPSHOT_RETRY_SECONDS = max(
+    0.0, float(os.getenv("LOGIN_PROFILE_SNAPSHOT_RETRY_SECONDS", "2"))
+)
 STATUS_CACHE_SECONDS = max(1, int(os.getenv("LOGIN_DESKTOP_STATUS_CACHE_SECONDS", "15")))
 LOGIN_NETWORK_MODE = str(os.getenv("LOGIN_DESKTOP_PROXY_MODE", "auto")).strip().lower()
 if LOGIN_NETWORK_MODE not in {"auto", "direct", "proxy"}:
@@ -53,23 +83,16 @@ LOGIN_PREFLIGHT_TIMEOUT_SECONDS = max(
 LOGIN_NETWORK_CACHE_SECONDS = max(
     0, int(os.getenv("LOGIN_DESKTOP_NETWORK_CACHE_SECONDS", "30"))
 )
-# Everything in the profile that can carry a signed-in session or personal data.
-# The HTTP and code caches stay, so the next login page loads warm.
+# Everything in the profile that can carry a signed-in session. Device-identity
+# data (Local Storage, IndexedDB, Service Worker, Storage) is deliberately KEPT:
+# Douyin binds its risk-control device id to it, and wiping it made every QR
+# login look like a brand-new device, which invites a server-side KICK soon
+# after login. Caches stay too, so the next login page loads warm.
 LOGIN_DATA_PATHS = (
     "Default/Cookies*",
     "Default/Network/Cookies*",
     "Default/Network/Trust Tokens*",
-    "Default/Local Storage",
-    "Default/Session Storage",
     "Default/Sessions",
-    "Default/IndexedDB",
-    "Default/Service Worker",
-    "Default/WebStorage",
-    "Default/SharedStorage*",
-    "Default/File System",
-    "Default/Storage",
-    "Default/databases",
-    "Default/blob_storage",
     "Default/Login Data*",
     "Default/Web Data*",
     "Default/Account Web Data*",
@@ -111,6 +134,92 @@ def _purge_login_data(profile_dir):
                     target.unlink()
             except OSError:
                 logger.warning("Could not remove login data %s", target.name, exc_info=True)
+
+
+_PROFILE_SNAPSHOT_IGNORE = shutil.ignore_patterns(
+    "Cache",
+    "Code Cache",
+    "GPUCache",
+    "DawnCache",
+    "DawnGraphiteCache",
+    "DawnWebGPUCache",
+    "GraphiteDawnCache",
+    "GrShaderCache",
+    "ShaderCache",
+    "CacheStorage",
+    "ScriptCache",
+    "Crashpad",
+    "BrowserMetrics*",
+    "Singleton*",
+    "lockfile",
+    "*.lock",
+    "LOG",
+    "LOG.old",
+)
+
+
+def numeric_douyin_uid(value):
+    """Return value only when it is a real Douyin uid, else "".
+
+    A uid is digits. Anything else -- notably the "web-self-<cookie hash>" the
+    www collector invents -- collapses to a digit fragment that names a
+    profile directory no account row ever refers to.
+    """
+    raw = str(value or "").strip()
+    if raw.isdigit() and len(raw) <= 32:
+        return raw
+    return ""
+
+
+def _profile_dir_for_unique_id(profile_root, unique_id):
+    digits = "".join(ch for ch in str(unique_id or "") if ch.isdigit())
+    raw = digits or str(unique_id or "").strip()
+    if not raw:
+        return None
+    # Mirror core.browser.sanitize_profile_name so the snapshot lands exactly
+    # where the task-side browser looks for it (this module cannot import core).
+    safe = re.sub(r"[^0-9A-Za-z._-]+", "_", f"uid-{raw}").strip("._-") or "unknown"
+    return Path(profile_root) / safe[:80]
+
+
+def _snapshot_profile_to_account(profile_dir, profile_root, unique_id):
+    """Copy the login profile's device identity into the account's task profile."""
+    target = _profile_dir_for_unique_id(profile_root, unique_id)
+    if target is None:
+        logger.warning("Skipped login profile snapshot: export carried no unique_id")
+        return False
+    source = Path(profile_dir)
+    if not source.is_dir():
+        return False
+    if (target / "SingletonLock").exists() or (target / "SingletonCookie").exists():
+        # A scheduled run owns the profile right now; copying into it would
+        # corrupt both. The next login will retry.
+        logger.warning("Skipped login profile snapshot into %s: profile is in use", target)
+        return False
+    target.parent.mkdir(parents=True, exist_ok=True)
+    stamp = f"{os.getpid()}-{int(time.time())}"
+    staging = target.parent / f".{target.name}.snapshot-{stamp}"
+    backup = target.parent / f".{target.name}.previous-{stamp}"
+    try:
+        # Stage next to the target so the swap is a same-filesystem rename; a
+        # task that starts mid-copy sees either the old profile or the new one,
+        # never a half-written directory.
+        shutil.copytree(source, staging, ignore=_PROFILE_SNAPSHOT_IGNORE)
+        if target.exists():
+            os.replace(target, backup)
+        os.replace(staging, target)
+    except OSError:
+        logger.warning("Could not snapshot login profile into %s", target, exc_info=True)
+        shutil.rmtree(staging, ignore_errors=True)
+        if not target.exists() and backup.exists():
+            try:
+                os.replace(backup, target)
+            except OSError:
+                logger.warning("Could not restore previous profile %s", target, exc_info=True)
+        return False
+    shutil.rmtree(backup, ignore_errors=True)
+    logger.info("Snapshotted login profile into %s", target)
+    return True
 
 
 def _api_bind_address():
@@ -207,6 +316,12 @@ class LoginDesktopManager:
         self._status_checked_at = 0.0
         self._idle_monitor_task = None
         self._scheduled_stop_task = None
+        # Set by export(): the account whose task profile should receive this
+        # login profile's device identity when the browser stops.
+        self._profile_export_unique_id = ""
+        # Last snapshot attempt, exposed by /status so a skipped copy is visible
+        # instead of only appearing in the container log.
+        self._last_snapshot = {}
         self._network_route = None
         self._network_checks = {}
         self._network_checked_at = 0.0
@@ -314,11 +429,16 @@ class LoginDesktopManager:
             if self.context and time.monotonic() - self._last_activity >= IDLE_TIMEOUT_SECONDS:
                 await self.stop(clear_profile=False)
 
+    def cancel_scheduled_stop(self):
+        task = self._scheduled_stop_task
+        if task is not None and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+        self._scheduled_stop_task = None
+
     def schedule_stop_after_export(self):
         if STOP_AFTER_EXPORT_SECONDS <= 0:
             return
-        if self._scheduled_stop_task and not self._scheduled_stop_task.done():
-            self._scheduled_stop_task.cancel()
+        self.cancel_scheduled_stop()
 
         async def stop_later():
             await asyncio.sleep(STOP_AFTER_EXPORT_SECONDS)
@@ -350,6 +470,10 @@ class LoginDesktopManager:
         async with self._lock:
             if self.context and not self._context_is_closed():
                 return
+            # A retry left over from a previous login must never be applied to
+            # the profile of the account that is about to log in.
+            self._profile_export_unique_id = ""
+            self.cancel_scheduled_stop()
             PROFILE_DIR.mkdir(parents=True, exist_ok=True)
             # A browser that crashed or was killed never went through stop(), so
             # its session may still be on disk; never start on someone's login.
@@ -424,6 +548,7 @@ class LoginDesktopManager:
         return self.page
 
     async def stop(self, clear_profile=False):
+        self.cancel_scheduled_stop()
         async with self._lock:
             if self.page:
                 try:
@@ -443,6 +568,60 @@ class LoginDesktopManager:
                 except Exception:
                     pass
                 self.playwright = None
+            # Snapshot while the profile is closed but before the session is
+            # purged: the account profile must inherit the exact device
+            # identity (and cookies) that just completed the login.
+            profile_export_unique_id = self._profile_export_unique_id
+            self._profile_export_unique_id = ""
+            if (
+                profile_export_unique_id
+                and not clear_profile
+                and PROFILE_DIR.is_dir()
+            ):
+                snapshotted = False
+                attempts = 0
+                for attempt in range(PROFILE_SNAPSHOT_RETRY_ATTEMPTS):
+                    attempts = attempt + 1
+                    snapshotted = await asyncio.to_thread(
+                        _snapshot_profile_to_account,
+                        PROFILE_DIR,
+                        PROFILE_EXPORT_ROOT,
+                        profile_export_unique_id,
+                    )
+                    if snapshotted:
+                        break
+                    if attempt + 1 < PROFILE_SNAPSHOT_RETRY_ATTEMPTS:
+                        await asyncio.sleep(PROFILE_SNAPSHOT_RETRY_SECONDS)
+                self._last_snapshot = {
+                    "unique_id": profile_export_unique_id,
+                    "ok": bool(snapshotted),
+                    "attempts": attempts,
+                    "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                }
+                if snapshotted:
+                    logger.warning(
+                        "Snapshotted the login profile into the account profile uid=%s",
+                        profile_export_unique_id,
+                    )
+                else:
+                    # Do not keep the uid for a later retry: stop() purges the
+                    # login session right below, so a deferred copy would
+                    # overwrite the account profile with a cookie-less one.
+                    logger.error(
+                        "Could not snapshot the login profile into uid=%s after %s attempts; "
+                        "the account profile may still carry the previous session",
+                        profile_export_unique_id,
+                        attempts,
+                    )
+            elif not clear_profile and PROFILE_DIR.is_dir():
+                # Without an identity captured at export time there is no
+                # account profile to write, and this silence is exactly what
+                # made the bypass invisible for weeks.
+                logger.warning(
+                    "Login profile closed without a snapshot: the export carried no "
+                    "unique_id, so the account profiles keep the device identity they "
+                    "already had instead of the one that just logged in"
+                )
             if clear_profile and PROFILE_DIR.exists():
                 shutil.rmtree(PROFILE_DIR, ignore_errors=True)
             elif PROFILE_DIR.exists():
@@ -495,6 +674,7 @@ class LoginDesktopManager:
                 "current_url": "",
                 "profile_dir": str(PROFILE_DIR),
                 "network": self._network_payload(),
+                "last_snapshot": dict(self._last_snapshot),
             }
             self._status_cache = payload
             self._status_checked_at = now
@@ -521,6 +701,7 @@ class LoginDesktopManager:
                 "current_url": "",
                 "profile_dir": str(PROFILE_DIR),
                 "network": self._network_payload(),
+                "last_snapshot": dict(self._last_snapshot),
             }
             self._status_cache = payload
             self._status_checked_at = now
@@ -560,6 +741,7 @@ class LoginDesktopManager:
             "current_url": current_url,
             "profile_dir": str(PROFILE_DIR),
             "network": self._network_payload(),
+            "last_snapshot": dict(self._last_snapshot),
         }
         self._status_cache = payload
         self._status_checked_at = now
@@ -801,12 +983,68 @@ class LoginDesktopManager:
             "url": payload["url"],
         }
 
-    async def export(self):
-        self.mark_activity()
-        page = await self._get_active_page()
-        result = await collect_login_result(page, self.context, timeout_ms=5000)
+    def _record_export_identity(self, result, explicit_target=""):
+        target = numeric_douyin_uid(explicit_target)
+        if not target and result and result.get("unique_id"):
+            collected = str(result.get("unique_id")).strip()
+            target = numeric_douyin_uid(collected)
+            if not target:
+                logger.warning(
+                    "Export identity %r is not a numeric Douyin uid; skipping the "
+                    "device identity snapshot rather than inventing a profile "
+                    "directory for it",
+                    collected,
+                )
+        self._profile_export_unique_id = target
         self.schedule_stop_after_export()
         return result
+
+    async def export(self, snapshot_unique_id=""):
+        """Collect the logged-in identity, creator page first, www as fallback.
+
+        The caller names the account it is logging in so the snapshot target
+        does not depend on which collector happened to answer.
+        """
+        self.mark_activity()
+        page = await self._get_active_page()
+        target = numeric_douyin_uid(snapshot_unique_id)
+        # A chosen re-login account is already named by the caller, so the card is
+        # worth only a short confirmation wait. Spending the full budget here made
+        # the save outlive the reverse proxy response timeout: the operator saw 502
+        # for a login that had in fact been written.
+        budget = (
+            RELOGIN_IDENTITY_CONFIRM_TIMEOUT_MS if target else EXPORT_IDENTITY_TIMEOUT_MS
+        )
+        try:
+            creator = await collect_login_result(page, self.context, timeout_ms=budget)
+        except Exception as creator_exc:
+            if target:
+                logger.warning(
+                    "Relogin export skipped the identity read for uid=%s after %dms: %s",
+                    target,
+                    budget,
+                    creator_exc,
+                )
+                return self._record_export_identity(
+                    {
+                        "unique_id": "",
+                        "username": "",
+                        "cookies": await self.context.cookies(),
+                    },
+                    target,
+                )
+            try:
+                www = await collect_www_login_result(page, self.context)
+            except Exception as www_exc:
+                raise RuntimeError(
+                    f"creator export failed: {creator_exc}; www export failed: {www_exc}"
+                ) from www_exc
+            logger.warning(
+                "Creator identity unreadable, exported from the www page instead: %s",
+                creator_exc,
+            )
+            return self._record_export_identity(www, snapshot_unique_id)
+        return self._record_export_identity(creator, snapshot_unique_id)
 
 
 def _clean_www_display_name(value):
@@ -865,11 +1103,12 @@ async def collect_www_identity_from_page(page):
 
 async def collect_www_login_result(page, context):
     cookies = await context.cookies()
-    try:
-        await page.goto(WWW_SELF_URL, wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_load_state("networkidle", timeout=15000)
-    except Exception:
-        pass
+    if not str(page.url or "").startswith(WWW_SELF_URL):
+        try:
+            await page.goto(WWW_SELF_URL, wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            pass
 
     identity = await collect_www_identity_from_page(page)
     username = ""
@@ -1064,15 +1303,17 @@ async def refresh_qr():
 
 
 @app.post("/export")
-async def export():
-    page = await manager._get_active_page()
+async def export(request: Request):
+    body = {}
     try:
-        result = await manager.export()
-    except Exception as creator_exc:
-        try:
-            result = await collect_www_login_result(page, manager.context)
-        except Exception as www_exc:
-            raise HTTPException(status_code=400, detail=f"creator export failed: {creator_exc}; www export failed: {www_exc}")
+        body = await request.json()
+    except Exception:
+        body = {}
+    target = str(body.get("snapshot_unique_id") or "").strip()
+    try:
+        result = await manager.export(snapshot_unique_id=target)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"login export failed: {exc}") from exc
     return {"ok": True, "result": result}
 
 

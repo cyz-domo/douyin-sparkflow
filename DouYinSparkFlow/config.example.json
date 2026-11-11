@@ -46,7 +46,7 @@
     "enabled": true,
     "root": "/opt/douyin-sparkflow/state/browser-profiles",
     "seedCookiesWhenEmpty": true,
-    "syncStoredCookiesBeforeRun": true,
+    "syncStoredCookiesBeforeRun": false,
     "refreshStoredCookiesAfterLogin": true
   }
 }
