@@ -1265,13 +1265,67 @@ async def _click_first_visible_locator(candidates, account_name, stage):
     return False
 
 
+FRIEND_FILTER_LABELS = ("互关", "朋友私信", "好友私信")
+
+
+async def _active_conversation_filter(page):
+    """Active filter label of the 2026-11 chat list, "" if none is active.
+
+    Returns None when the page has no filter bar at all, which is how the
+    pre-2026-11 markup looked.
+    """
+    try:
+        labels = await page.evaluate(
+            """() => Array.from(document.querySelectorAll(
+                '#sub-app [class*="conversationFilterTagBartagItemActive"]'
+            )).map((element) => (element.innerText || '')
+                .split(String.fromCharCode(10))[0].trim())"""
+        )
+    except Exception:
+        return None
+    return labels[0] if labels else ""
+
+
+async def _click_conversation_filter(page, account_name):
+    try:
+        clicked = await page.evaluate(
+            """(labels) => {
+                const items = Array.from(document.querySelectorAll(
+                    '#sub-app [class*="conversationFilterTagBartagItemLabel"]'
+                ));
+                for (const wanted of labels) {
+                    const hit = items.find((item) => (item.innerText || '').trim() === wanted);
+                    if (hit) {
+                        hit.click();
+                        return wanted;
+                    }
+                }
+                return "";
+            }""",
+            list(FRIEND_FILTER_LABELS),
+        )
+    except Exception as exc:
+        logger.debug("Account %s could not click conversation filter: %s", account_name, exc)
+        return ""
+    if clicked:
+        logger.info("Account %s clicked conversation filter %s", account_name, clicked)
+    return clicked
+
+
 async def _open_friends_tab(page, account_name, fallback_selector, target_selectors):
     await _dismiss_non_login_dialogs(page, account_name, "before_open_friends_tab")
 
     _, existing_locator = await _first_non_empty_locator(page, target_selectors)
-    if existing_locator:
+    active_filter = await _active_conversation_filter(page)
+    if existing_locator and (active_filter is None or active_filter in FRIEND_FILTER_LABELS):
         logger.info("Account %s friend list is already visible before tab click", account_name)
         return "already_visible"
+
+    # On the 2026-11 chat list the default tab is 全部, which also lists group
+    # chats; the mutual-follow filter is what the old markup showed by default.
+    if await _click_conversation_filter(page, account_name):
+        await asyncio.sleep(2)
+        return "clicked_conversation_filter"
 
     sub_app = page.locator('xpath=//*[@id="sub-app"]')
     text_selector = (
@@ -1395,6 +1449,11 @@ async def _wait_for_friend_list_ready(
 
 async def _extract_friend_display_name(element):
     name_selectors = (
+        # 2026-11 chat list: rows are div[data-e2e="conversation-item"] and the
+        # nickname is the exact conversationConversationItemtitle class token.
+        # A substring match would also hit its *Wrapper parent, whose text also
+        # contains the streak count and timestamp.
+        'xpath=.//*[contains(concat(" ", normalize-space(@class), " "), " conversationConversationItemtitle ")]',
         """xpath=.//span[contains(@class, "item-header-name-")]""",
         """xpath=.//*[contains(@class, "item-header-name-")]""",
     )
@@ -1477,9 +1536,32 @@ async def _first_scrollable_friends_element(page, selectors):
     return "", None
 
 
+async def _friend_list_scrolled_to_end(page, selectors):
+    """True when the list container cannot scroll any further.
+
+    The 2026-11 chat list dropped the "no more" tip, so without this the scan
+    never detects the end of the list and keeps rescanning until it times out.
+    """
+    _, element = await _first_scrollable_friends_element(page, selectors)
+    if element is None:
+        return False
+    try:
+        return bool(
+            await page.evaluate(
+                "(element) => element.scrollHeight > element.clientHeight + 8"
+                " && element.scrollTop + element.clientHeight >= element.scrollHeight - 8",
+                element,
+            )
+        )
+    except Exception:
+        return False
+
+
 async def scroll_and_select_user(page, user, account_name, targets, friend_scan_config=None, index_targets=None):
     friends_tab_selector = 'xpath=//*[@id="sub-app"]/div/div/div[1]/div[2]'
     target_selectors = (
+        '#sub-app [data-e2e="conversation-item"]',
+        'xpath=//*[@id="sub-app"]//div[contains(@class, "conversationConversationItemwrapper")]',
         '#sub-app li[role="listitem"]:has([class*="item-header-name-"])',
         '#sub-app li.semi-list-item:has([class*="item-header-name-"])',
         'xpath=//*[@id="sub-app"]/div/div[1]/div[2]/div[2]'
@@ -1488,6 +1570,7 @@ async def scroll_and_select_user(page, user, account_name, targets, friend_scan_
         'xpath=//*[@id="sub-app"]//li[.//span[contains(@class, "item-header-name-")]]',
     )
     scrollable_friends_selectors = (
+        '#sub-app [class*="conversationConversationListwrapper"]',
         '#sub-app [role="grid"]',
         '#sub-app .ReactVirtualized__Grid',
         'xpath=//*[@id="sub-app"]/div/div[1]/div[2]/div[2]/div/div/div[3]/div/div/div/ul/div',
@@ -1697,7 +1780,11 @@ async def scroll_and_select_user(page, user, account_name, targets, friend_scan_
             return
 
         else:
-            if await _selector_visible(page, no_more_selectors):
+            reached_list_end = await _friend_list_scrolled_to_end(
+                page,
+                scrollable_friends_selectors,
+            )
+            if reached_list_end or await _selector_visible(page, no_more_selectors):
                 if next_target_key:
                     missing_delivery_targets.add(next_target_key)
                     remaining_targets.discard(next_target_key)

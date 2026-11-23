@@ -67,12 +67,15 @@ FRIENDS_TAB_SELECTOR = 'xpath=//*[@id="sub-app"]/div/div/div[1]/div[2]'
 # child indexes change frequently.  Keep semantic/current selectors first, with
 # the historical XPath selectors last for older page variants.
 FRIEND_ROW_SELECTORS = (
+    '#sub-app [data-e2e="conversation-item"]',
+    'xpath=//*[@id="sub-app"]//div[contains(@class, "conversationConversationItemwrapper")]',
     '#sub-app li[role="listitem"]:has([class*="item-header-name-"])',
     '#sub-app li.semi-list-item:has([class*="item-header-name-"])',
     'xpath=//*[@id="sub-app"]//div[contains(@class, "semi-list-item-body") and .//*[contains(@class, "item-header-name-")]]',
     'xpath=//*[@id="sub-app"]/div/div[1]/div[2]/div[2]//div[contains(@class, "semi-list-item-body semi-list-item-body-flex-start")]',
 )
 SCROLLABLE_FRIENDS_SELECTORS = (
+    '#sub-app [class*="conversationConversationListwrapper"]',
     '#sub-app [role="grid"]',
     '#sub-app .ReactVirtualized__Grid',
     '#sub-app [class*="semi-list"] ul',
@@ -90,6 +93,9 @@ LOADING_SELECTORS = (
     '#sub-app [class*="Loading"]',
 )
 FRIEND_NAME_SELECTORS = (
+    # Exact class token: the *Wrapper parent also contains this substring but
+    # its text includes the streak count and timestamp.
+    'xpath=.//*[contains(concat(" ", normalize-space(@class), " "), " conversationConversationItemtitle ")]',
     'xpath=.//*[contains(@class, "item-header-name-")]',
     '[class*="item-header-name-"]',
 )
@@ -167,8 +173,50 @@ async def _dismiss_non_login_dialogs(page):
     return False
 
 
+FRIEND_FILTER_LABELS = ("互关", "朋友私信", "好友私信")
+
+
+async def _active_conversation_filter(page):
+    """Active filter label of the 2026-11 chat list, None when there is no bar."""
+    try:
+        labels = await page.evaluate(
+            """() => Array.from(document.querySelectorAll(
+                '#sub-app [class*="conversationFilterTagBartagItemActive"]'
+            )).map((element) => (element.innerText || '')
+                .split(String.fromCharCode(10))[0].trim())"""
+        )
+    except Exception:
+        return None
+    return labels[0] if labels else ""
+
+
 async def _click_friends_tab(page):
     await page.wait_for_selector("#sub-app", timeout=FRIEND_LIST_READY_TIMEOUT_SECONDS * 1000)
+    if await _active_conversation_filter(page) in FRIEND_FILTER_LABELS:
+        return
+    try:
+        clicked = await page.evaluate(
+            """(labels) => {
+                const items = Array.from(document.querySelectorAll(
+                    '#sub-app [class*="conversationFilterTagBartagItemLabel"]'
+                ));
+                for (const wanted of labels) {
+                    const hit = items.find((item) => (item.innerText || '').trim() === wanted);
+                    if (hit) {
+                        hit.click();
+                        return wanted;
+                    }
+                }
+                return "";
+            }""",
+            list(FRIEND_FILTER_LABELS),
+        )
+    except Exception:
+        clicked = ""
+    if clicked:
+        logger.debug("Clicked conversation filter %s", clicked)
+        await asyncio.sleep(1)
+        return
     try:
         await page.get_by_role("tab", name="朋友私信", exact=True).click(timeout=5000)
         return
@@ -201,6 +249,7 @@ async def _friend_list_dom_summary(page):
                 liCount: sub.querySelectorAll('li').length,
                 listItemCount: sub.querySelectorAll('[class*="list-item"]').length,
                 nameSpanCount: sub.querySelectorAll('[class*="item-header-name"]').length,
+                conversationItemCount: sub.querySelectorAll('[data-e2e="conversation-item"]').length,
                 text: (sub.innerText || '').split(String.fromCharCode(10)).join(' ').slice(0, 500),
             };
         }"""
