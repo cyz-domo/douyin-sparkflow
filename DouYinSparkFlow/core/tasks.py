@@ -440,9 +440,13 @@ async def locate_chat_input(page):
 async def read_chat_input_text(chat_input):
     try:
         return await chat_input.evaluate(
-            """(node) => {
-                const raw = node.innerText ?? node.textContent ?? "";
-                return raw.trim();
+            r"""(node) => {
+                const raw = String(node.innerText ?? node.textContent ?? "");
+                // Douyin's editor re-seeds an empty box with a zero-width
+                // placeholder. String.prototype.trim() does not treat U+200B as
+                // whitespace, so strip zero-width code points explicitly before
+                // deciding whether the box is really empty.
+                return raw.replace(/[\u200b\u200c\u200d\u2060\ufeff]/g, "").trim();
             }"""
         )
     except Exception:
@@ -575,13 +579,16 @@ async def start_im_send_observer(page, account_name, target_name):
         if isinstance(data, dict):
             for key in ("status_msg", "message", "msg", "err_msg", "error", "reason"):
                 value = data.get(key)
-                if value:
+                # The 2026-11 message/send body carries a structured
+                # status_msg dict (msg_type/msg_content) even on success; only
+                # a string can be an error message.
+                if isinstance(value, str) and value:
                     return _trim(value, 300)
             nested = data.get("data")
             if isinstance(nested, dict):
                 for key in ("status_msg", "message", "msg", "err_msg", "error", "reason"):
                     value = nested.get(key)
-                    if value:
+                    if isinstance(value, str) and value:
                         return _trim(value, 300)
         return _trim(body_text, 300)
 
@@ -669,6 +676,12 @@ async def start_im_send_observer(page, account_name, target_name):
             body = await session.send("Network.getResponseBody", {"requestId": request_id})
             body_text = _decode_body(body)
             data = _parse_json_body(body_text)
+            framed_body = False
+            if not isinstance(data, dict):
+                embedded = _extract_embedded_json(body_text)
+                if isinstance(embedded, dict):
+                    data = embedded
+                    framed_body = True
             http_ok = isinstance(status, (int, float)) and 200 <= status < 300
             json_ok = _json_body_success(data)
             receipt_ok = bool(
@@ -680,6 +693,8 @@ async def start_im_send_observer(page, account_name, target_name):
                 )
             )
             receipt = {"call": kind, "httpStatus": status, "ok": receipt_ok, "jsonParsed": isinstance(data, dict), "logid": _trim(logid, 120), "url": _safe_url(url)}
+            if framed_body:
+                receipt["framedBody"] = True
             receipt.update(_receipt_body_meta(data, body_text))
             # A KICK body can look like a successful JSON response, so it must
             # override `ok` instead of only decorating the receipt.
@@ -738,54 +753,63 @@ async def snapshot_last_own_message(page, chat_input=None):
         return await page.evaluate(
             r"""() => {
                 // ---- DOM structure (douyin creator private message) ----
-                // Each row is <div class="box-item-W0TV01 ...">...</div>.
-                //   - time separator:   class contains "time-" (e.g. time-Tl7Z4j)
-                //   - own message:       class contains "is-me"   (e.g. is-me-cb9NAa)
-                //   - peer message:      no "is-me" and no "time-"
-                // Text is inside <pre class="text-...">.
+                // 2026-11 redesign: each bubble is
+                //   <div data-e2e="msg-item-content" class="MessageBoxContent...">
+                // with own messages marked by an "isFromMe" class on an
+                // ancestor/descendant, and day separators in
+                // <... class="MessageBoxTimetimeLayout">.
+                // Legacy layout (pre-redesign) used rows with class
+                // "box-item-*", own message "is-me", separator "time-"; keep
+                // both so a rollback on Douyin's side doesn't break us.
 
-                const allRows = Array.from(
-                    document.querySelectorAll("[class*='box-item-']")
-                ).filter(el => {
-                    const r = el.getBoundingClientRect();
-                    return r.width > 0 && r.height > 0;
-                });
+                const rows = Array.from(document.querySelectorAll(
+                    '[data-e2e="msg-item-content"], [class*="box-item-"], [class*="MessageBoxTimetime"]'
+                ));
 
-                // Walk backwards to find the boundary: first time separator that
-                // indicates yesterday or earlier. Everything after it is "today".
-                let todayStart = 0;
-                for (let i = allRows.length - 1; i >= 0; i--) {
-                    const cls = String(allRows[i].className || "");
-                    if (!cls.includes("time-")) continue;
-                    const label = String(allRows[i].innerText || "").trim();
-                    // "今天" / "刚刚" / "N分钟前" / pure time like "11:01" => today
-                    // "昨天" / "星期X" / "2026-..." => not today
-                    if (/^(昨天|星期|20\d{2}-)/.test(label)) {
-                        todayStart = i + 1;
-                        break;
+                const ownRows = [];
+                for (const el of rows) {
+                    const cls = String(el.className || "");
+                    if (cls.includes("MessageBoxTimetime") || cls.includes("time-")) {
+                        const label = String(el.innerText || "").trim().split("\n")[0];
+                        // "今天" / "刚刚" / "N分钟前" / pure time => today.
+                        // Anything explicitly older starts a new day: drop
+                        // everything collected before it.
+                        if (/^(昨天|前天|星期|周[一二三四五六日天]|20\d{2}[-/年])/.test(label)) {
+                            ownRows.length = 0;
+                        }
+                        continue;
                     }
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width <= 0 || rect.height <= 0) continue;
+                    let text = "";
+                    if (el.getAttribute("data-e2e") === "msg-item-content") {
+                        const own = Boolean(
+                            el.closest('[class*="isFromMe"]')
+                            || el.querySelector('[class*="isFromMe"]')
+                        );
+                        if (!own) continue;
+                        text = String(el.innerText || "").trim();
+                    } else {
+                        if (!cls.includes("is-me")) continue;
+                        const pre = el.querySelector("pre, [class*='text-']");
+                        text = String(pre?.innerText || el.innerText || "").trim();
+                    }
+                    if (!text) continue;
+                    ownRows.push({text, rect, cls: cls.slice(0, 240)});
                 }
 
-                // From bottom, find the last own-message row within today's section.
-                for (let i = allRows.length - 1; i >= todayStart; i--) {
-                    const cls = String(allRows[i].className || "");
-                    if (!cls.includes("is-me")) continue;
-                    if (cls.includes("time-")) continue;
-                    const pre = allRows[i].querySelector("pre, [class*='text-']");
-                    const text = String(pre?.innerText || allRows[i].innerText || "").trim();
-                    if (!text) continue;
-                    const rect = allRows[i].getBoundingClientRect();
-                    return {
-                        text,
-                        centerX: rect.left + rect.width / 2,
-                        centerY: rect.top + rect.height / 2,
-                        top: rect.top,
-                        bottom: rect.bottom,
-                        right: rect.right,
-                        className: cls.slice(0, 240),
-                    };
-                }
-                return null;
+                const last = ownRows[ownRows.length - 1];
+                if (!last) return null;
+                const rect = last.rect;
+                return {
+                    text: last.text,
+                    centerX: rect.left + rect.width / 2,
+                    centerY: rect.top + rect.height / 2,
+                    top: rect.top,
+                    bottom: rect.bottom,
+                    right: rect.right,
+                    className: last.cls,
+                };
             }""",
         )
     except Exception as exc:
@@ -798,29 +822,36 @@ async def count_today_own_message_matches(page, target_text):
     try:
         return await page.evaluate(
             r"""(targetText) => {
-                const allRows = Array.from(
-                    document.querySelectorAll("[class*='box-item-']")
-                ).filter(el => {
-                    const r = el.getBoundingClientRect();
-                    return r.width > 0 && r.height > 0;
-                });
-                let todayStart = 0;
-                for (let i = allRows.length - 1; i >= 0; i--) {
-                    const cls = String(allRows[i].className || "");
-                    if (!cls.includes("time-")) continue;
-                    const label = String(allRows[i].innerText || "").trim();
-                    if (/^(昨天|星期|20\d{2}-)/.test(label)) {
-                        todayStart = i + 1;
-                        break;
+                const rows = Array.from(document.querySelectorAll(
+                    '[data-e2e="msg-item-content"], [class*="box-item-"], [class*="MessageBoxTimetime"]'
+                ));
+                const ownTexts = [];
+                for (const el of rows) {
+                    const cls = String(el.className || "");
+                    if (cls.includes("MessageBoxTimetime") || cls.includes("time-")) {
+                        const label = String(el.innerText || "").trim().split("\n")[0];
+                        if (/^(昨天|前天|星期|周[一二三四五六日天]|20\d{2}[-/年])/.test(label)) {
+                            ownTexts.length = 0;
+                        }
+                        continue;
+                    }
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width <= 0 || rect.height <= 0) continue;
+                    if (el.getAttribute("data-e2e") === "msg-item-content") {
+                        const own = Boolean(
+                            el.closest('[class*="isFromMe"]')
+                            || el.querySelector('[class*="isFromMe"]')
+                        );
+                        if (!own) continue;
+                        ownTexts.push(String(el.innerText || "").trim());
+                    } else {
+                        if (!cls.includes("is-me")) continue;
+                        const pre = el.querySelector("pre, [class*='text-']");
+                        ownTexts.push(String(pre?.innerText || el.innerText || "").trim());
                     }
                 }
                 let count = 0;
-                for (let i = todayStart; i < allRows.length; i++) {
-                    const cls = String(allRows[i].className || "");
-                    if (!cls.includes("is-me")) continue;
-                    if (cls.includes("time-")) continue;
-                    const pre = allRows[i].querySelector("pre, [class*='text-']");
-                    const text = String(pre?.innerText || allRows[i].innerText || "").trim();
+                for (const text of ownTexts) {
                     if (text === targetText) count++;
                 }
                 return count;
@@ -921,12 +952,10 @@ async def confirm_message_sent(page, chat_input, message, before_snapshot=None):
                 "last own message matches sent text; chat input cleared",
             )
         # Count fallback: even if the last own bubble is not our message (e.g.
-        # the user sent something else from their phone), a new occurrence of
-        # the target text today means our send went through.
-        if (
-            not last_input_text
-            and not last_snapshot
-        ):
+        # the user sent something else from their phone, or the virtualized
+        # list hasn't painted the new bubble yet), a new occurrence of the
+        # target text today means our send went through.
+        if not last_input_text:
             after_count = await count_today_own_message_matches(page, expected_message)
             if after_count > before_count:
                 return (
@@ -1014,11 +1043,10 @@ def _json_body_success(data):
                 code_seen = True
                 if candidate.get(key) not in (0, "0"):
                     code_success = False
-        message = str(
-            candidate.get("message")
-            or candidate.get("status_msg")
-            or ""
-        ).lower()
+        # status_msg is a *dict* (msg_type/msg_content) on success in the
+        # 2026-11 send response, so only string messages can indicate errors.
+        message_value = candidate.get("message") or candidate.get("status_msg") or ""
+        message = message_value.lower() if isinstance(message_value, str) else ""
         if message and message not in ("success", "ok"):
             error_seen = True
         for key in ("error", "error_msg", "err_msg"):
@@ -1029,6 +1057,50 @@ def _json_body_success(data):
         return code_success and not error_seen
     if error_seen:
         return False
+    return None
+
+
+def _extract_embedded_json(text):
+    """Parse the first balanced JSON object embedded in a non-JSON body.
+
+    Douyin's creator IM now answers ``message/send`` with a protobuf-framed
+    payload whose tail carries the JSON status object
+    (``{"status_code":0,...}``). ``json.loads`` fails on the whole body, so
+    without this fallback every accepted send looks like a rejected one.
+    """
+    if not text:
+        return None
+    length = len(text)
+    for start in range(length):
+        if text[start] != "{":
+            continue
+        depth = 0
+        in_string = False
+        escaped = False
+        for index in range(start, length):
+            char = text[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        parsed = json.loads(text[start:index + 1])
+                    except Exception:
+                        break
+                    if isinstance(parsed, dict):
+                        return parsed
+                    break
     return None
 
 
